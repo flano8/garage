@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Garagenverwaltung</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23233041'/><path d='M6 14 16 7l10 7v11H6z' fill='%23e8a33d'/><path d='M10 16h12M10 19h12M10 22h12' stroke='%23233041' stroke-width='1.6'/></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><path d="M4 14 16 5l12 9v13H4z" fill="var(--accent)"/><path d="M9 16h14M9 19.5h14M9 23h14" stroke="var(--ink-strong)" stroke-width="1.8"/></svg>
+    <span>Garagenverwaltung</span>
+  </div>
+  <nav id="tabs">
+    <button data-view="uebersicht" class="active">Übersicht</button>
+    <button data-view="garagen">Garagen</button>
+    <button data-view="mieter">Mieter</button>
+    <button data-view="vertraege">Verträge</button>
+    <button data-view="zahlungen">Mieteingänge</button>
+    <button data-view="warteliste">Warteliste</button>
+    <button data-view="einstellungen">Einstellungen</button>
+  </nav>
+  <div id="syncState" class="sync" title="Speicherstatus"></div>
+</header>
+
+<main id="view"></main>
+
+<dialog id="modal">
+  <form method="dialog" id="modalForm">
+    <h2 id="modalTitle"></h2>
+    <div id="modalBody"></div>
+    <div class="modal-actions" id="modalActions"></div>
+  </form>
+</dialog>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script src="vendor/jspdf.umd.min.js"></script>
+<script src="docs.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
