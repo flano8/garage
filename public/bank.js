@@ -100,75 +100,104 @@ window.Bank = (() => {
 
   const AMT = /[-+]?\d{1,3}(?:\.\d{3})*,\d{2}(?:\s?[-+SH](?![A-Za-zÄÖÜäöüß]))?/g;
 
+  // PDF in Zeilen zerlegen: Textstücke mit ähnlicher Höhe (±3 pt) bilden eine Zeile
   async function pdfLines(buf) {
     const pdfjs = await loadPdfJs();
     const pdf = await pdfjs.getDocument({ data: buf }).promise;
     const lines = [];
     for (let p = 1; p <= pdf.numPages; p++) {
       const page = await pdf.getPage(p);
-      const vp = page.getViewport({ scale: 1 });
       const content = await page.getTextContent();
-      const byY = new Map();
-      for (const it of content.items) {
-        if (!it.str || !it.str.trim()) continue;
-        const y = Math.round(it.transform[5] / 2.5) * 2.5;
-        if (!byY.has(y)) byY.set(y, []);
-        byY.get(y).push({ x: it.transform[4], s: it.str, w: it.width });
+      const items = content.items.filter((it) => it.str && it.str.trim())
+        .map((it) => ({ x: it.transform[4], y: it.transform[5], s: it.str.trim(), w: it.width }))
+        .sort((a, b) => b.y - a.y || a.x - b.x);
+      const clusters = [];
+      for (const it of items) {
+        const c = clusters.find((c) => Math.abs(c.y - it.y) <= 3);
+        if (c) c.items.push(it); else clusters.push({ y: it.y, items: [it] });
       }
-      [...byY.entries()].sort((a, b) => b[0] - a[0]).forEach(([, items]) => {
-        items.sort((a, b) => a.x - b.x);
-        lines.push({ text: items.map((i) => i.s).join(" ").replace(/\s+/g, " ").trim(), items, pageWidth: vp.width });
+      clusters.sort((a, b) => b.y - a.y).forEach((c) => {
+        c.items.sort((a, b) => a.x - b.x);
+        lines.push({ page: p, y: c.y, items: c.items, text: c.items.map((i) => i.s).join(" ").replace(/\s+/g, " ").trim() });
       });
     }
     return lines;
   }
 
-  function fromPdfLines(lines) {
+  const AMT_FULL = /^[-+]?\d{1,3}(?:\.\d{3})*,\d{2}$/;
+  const STOP = /^(kontostand|ihr dispositionskredit|gesamtumsatzsummen|deutsche kreditbank|hinweise zum kontoauszug|kontoauszug \d|girokonto|datum\s+erläuterung|\.\s*-?\d)/i;
+
+  // Kontoauszug mit Spalten "Soll" / "Haben" (DKB und viele andere Banken)
+  function fromPdfColumns(lines) {
     const all = lines.map((l) => l.text).join("\n");
-    const yearMatch = all.match(/\b(20\d{2})\b/);
-    const fallbackYear = yearMatch ? Number(yearMatch[1]) : new Date().getFullYear();
-    // Spaltenposition der Beträge ermitteln: Haben (Eingang) ist bei DKB rechts von Soll
+    const fallbackYear = Number((all.match(/\b(20\d{2})\b/) || [])[1]) || new Date().getFullYear();
+    const cols = {};
+    lines.forEach((l) => {
+      const soll = l.items.find((i) => /soll/i.test(i.s));
+      const haben = l.items.find((i) => /haben/i.test(i.s));
+      if (soll && haben && /betrag|datum/i.test(l.text)) cols[l.page] = { soll: soll.x + soll.w, haben: haben.x + haben.w };
+    });
+    if (!Object.keys(cols).length) return null;
+    const tx = [];
+    let cur = null;
+    const finish = () => { if (cur) { tx.push(cur); cur = null; } };
+    for (const l of lines) {
+      const c = cols[l.page];
+      const first = l.items[0];
+      const isDate = first && /^\d{1,2}\.\d{1,2}\.(\d{2,4})?$/.test(first.s) && first.x < 120;
+      if (isDate && c) {
+        finish();
+        const amt = l.items.slice().reverse().find((i) => AMT_FULL.test(i.s) && i.x > first.x + 100);
+        if (!amt) continue;
+        const right = amt.x + amt.w;
+        let betrag = parseAmount(amt.s);
+        const zumHaben = Math.abs(right - c.haben) < Math.abs(right - c.soll);
+        betrag = zumHaben && !/^-/.test(amt.s) ? Math.abs(betrag) : -Math.abs(betrag);
+        const typ = l.items.filter((i) => i !== first && i !== amt).map((i) => i.s).join(" ");
+        cur = { datum: parseDate(first.s, fallbackYear), betrag, typ, zeilen: [], quelle: "PDF" };
+      } else if (cur) {
+        if (STOP.test(l.text) || (c && l.items[0].x < 60 && !/^\d{1,2}\.\d{1,2}\./.test(l.text))) { finish(); continue; }
+        cur.zeilen.push(l.text);
+      }
+    }
+    finish();
+    return tx.filter((t) => t.datum && !isNaN(t.betrag)).map((t) => {
+      const zweck = t.zeilen.join(" ").replace(/\s+/g, " ").trim();
+      const iban = (zweck.match(/\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){3,7}(?:\s?[A-Z0-9]{1,4})?\b/) || [""])[0].replace(/\s/g, "");
+      // Name = Anfang der ersten Zeile bis zum ersten typischen Zweck-Wort
+      const erste = t.zeilen[0] || "";
+      const name = (erste.split(/\s(?=garage|garagen|garge|miete|mvn|rechnung|datum|\d)/i)[0] || erste).trim();
+      return { datum: t.datum, betrag: t.betrag, name, zweck, iban, typ: t.typ, text: `${t.typ} ${zweck}`, quelle: "PDF" };
+    });
+  }
+
+  // Fallback für Auszüge ohne erkennbare Soll/Haben-Spalten
+  function fromPdfLines(lines) {
+    const cols = fromPdfColumns(lines);
+    if (cols && cols.length) return cols;
+    const all = lines.map((l) => l.text).join("\n");
+    const fallbackYear = Number((all.match(/\b(20\d{2})\b/) || [])[1]) || new Date().getFullYear();
     const blocks = [];
     let cur = null;
     for (const l of lines) {
-      if (/^\d{1,2}\.\d{1,2}\.(\d{2,4})?\b/.test(l.text)) {
-        if (cur) blocks.push(cur);
-        cur = { lines: [l] };
-      } else if (cur) {
-        if (/kontostand|saldo|übertrag|seite \d|blatt \d/i.test(l.text) || cur.lines.length > 8) { blocks.push(cur); cur = null; }
+      if (/^\d{1,2}\.\d{1,2}\.(\d{2,4})?\b/.test(l.text)) { if (cur) blocks.push(cur); cur = { lines: [l] }; }
+      else if (cur) {
+        if (STOP.test(l.text) || cur.lines.length > 8) { blocks.push(cur); cur = null; }
         else cur.lines.push(l);
       }
     }
     if (cur) blocks.push(cur);
-
     const tx = [];
     for (const b of blocks) {
       const text = b.lines.map((l) => l.text).join(" ");
-      if (/kontostand|saldo|übertrag/i.test(text)) continue;
       const amounts = [];
-      b.lines.forEach((l) => l.items.forEach((it) => {
-        const m = it.s.match(AMT);
-        if (m) m.forEach((a) => amounts.push({ a, x: it.x + it.w, pw: l.pageWidth }));
-      }));
+      b.lines.forEach((l) => l.items.forEach((it) => { if (AMT_FULL.test(it.s)) amounts.push(it); }));
       if (!amounts.length) continue;
-      const last = amounts[amounts.length - 1];
-      let betrag = parseAmount(last.a.replace(/\s?[SH]$/, ""));
-      if (/S$/.test(last.a)) betrag = -Math.abs(betrag);
-      if (isNaN(betrag)) continue;
+      const betrag = parseAmount(amounts[amounts.length - 1].s);
       const datum = parseDate(text, fallbackYear);
-      if (!datum) continue;
-      const iban = (text.match(/\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){3,7}(?:\s?[A-Z0-9]{1,4})?\b/) || [""])[0].replace(/\s/g, "");
-      const rest = text.replace(/\d{1,2}\.\d{1,2}\.(\d{2,4})?/g, "").replace(AMT, "").replace(/\s+/g, " ").trim();
-      tx.push({ datum, betrag, name: rest.slice(0, 60), zweck: rest, iban, typ: "", text, quelle: "PDF", xRight: last.x, pageWidth: last.pw });
-    }
-    // Ohne Vorzeichen: Beträge in der rechten Spalte = Eingang, linke Spalte = Ausgang
-    if (tx.length && !tx.some((t) => t.betrag < 0)) {
-      const xs = tx.map((t) => t.xRight).sort((a, b) => a - b);
-      const spread = xs[xs.length - 1] - xs[0];
-      if (spread > 40) {
-        const mid = (xs[0] + xs[xs.length - 1]) / 2;
-        tx.forEach((t) => { if (t.xRight < mid) t.betrag = -Math.abs(t.betrag); });
-      }
+      if (!datum || isNaN(betrag)) continue;
+      const rest = text.replace(/\d{1,2}\.\d{1,2}\.(\d{2,4})?/g, "").replace(/[-+]?\d{1,3}(?:\.\d{3})*,\d{2}/g, "").replace(/\s+/g, " ").trim();
+      tx.push({ datum, betrag, name: rest.slice(0, 60), zweck: rest, iban: "", typ: "", text, quelle: "PDF" });
     }
     return tx;
   }

@@ -55,6 +55,7 @@
   const num = (v) => { const n = parseFloat(String(v ?? "").replace(",", ".")); return isNaN(n) ? 0 : n; };
   // Monatliche Gesamtzahlung des Mieters (Miete + Nebenkostenpauschale)
   const gesamt = (v) => num(v.miete) + num(v.nebenkosten);
+  const mKurz = (k) => { const [y, m] = k.split("-"); return `${m}.${y}`; };
   const fmtPct = (x) => (x * 100).toLocaleString("de-DE", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + " %";
 
   function setSync(text, err = false) {
@@ -299,58 +300,198 @@
   const rerender = () => views[current]();
   function commit() { save(); rerender(); }
 
-  /* ================= Übersicht ================= */
+  /* ================= Übersicht / Dashboard ================= */
+  const kurzMonat = (k) => { const [y, m] = k.split("-").map(Number); return new Date(y, m - 1, 1).toLocaleDateString("de-DE", { month: "short" }).replace(".", "") + (m === 1 ? " " + String(y).slice(2) : ""); };
+  const eur0 = (n) => Number(n || 0).toLocaleString("de-DE", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
+  function niceMax(v) {
+    if (v <= 0) return 100;
+    const p = Math.pow(10, Math.floor(Math.log10(v)));
+    for (const f of [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) if (f * p >= v) return f * p;
+    return 10 * p;
+  }
+  // Fällige Miete eines Vertrags in Monat k (0, wenn noch nicht/nicht mehr laufend)
+  function sollImMonat(v, k) {
+    const start = v.zahlungenAb || monthKey(v.beginn || "2000-01-01");
+    if (k < start) return 0;
+    if (v.beginn && monthKey(v.beginn) > k) return 0;
+    if (v.status !== "aktiv" && v.endeZum && monthKey(v.endeZum) < k) return 0;
+    return gesamt(v);
+  }
+
+  function saeulen(daten) {
+    const klein = window.innerWidth < 640;
+    const W = klein ? 360 : 640, H = klein ? 220 : 230, ml = 46, mr = 8, mt = 12, mb = 28;
+    const iw = W - ml - mr, ih = H - mt - mb;
+    const max = niceMax(Math.max(...daten.map((d) => Math.max(d.soll, d.ist))));
+    const y = (v) => mt + ih - (v / max) * ih;
+    const band = iw / daten.length;
+    const bw = Math.min(24, band * 0.5);
+    let svg = `<svg viewBox="0 0 ${W} ${H}" class="chart" role="img" aria-label="Mieteingänge pro Monat">`;
+    for (let i = 0; i <= 4; i++) {
+      const v = (max / 4) * i, yy = y(v);
+      svg += `<line x1="${ml}" x2="${W - mr}" y1="${yy}" y2="${yy}" class="grid"/><text x="${ml - 8}" y="${yy + 4}" class="tick" text-anchor="end">${eur0(v).replace(/\s?€/, "")}</text>`;
+    }
+    daten.forEach((d, i) => {
+      const cx = ml + band * i + band / 2;
+      const top = y(d.ist), h = mt + ih - top;
+      if (h > 0.5) {
+        const r = Math.min(4, h, bw / 2);
+        svg += `<path class="bar" d="M${cx - bw / 2},${mt + ih} V${top + r} Q${cx - bw / 2},${top} ${cx - bw / 2 + r},${top} H${cx + bw / 2 - r} Q${cx + bw / 2},${top} ${cx + bw / 2},${top + r} V${mt + ih} Z"/>`;
+      }
+      if (d.soll > 0) svg += `<line x1="${cx - bw / 2 - 6}" x2="${cx + bw / 2 + 6}" y1="${y(d.soll)}" y2="${y(d.soll)}" class="soll"/>`;
+      svg += `<text x="${cx}" y="${H - 8}" class="tick" text-anchor="middle">${esc(kurzMonat(d.k))}</text>`;
+      const quote = d.soll ? Math.round((d.ist / d.soll) * 100) : 0;
+      svg += `<rect x="${ml + band * i}" y="${mt}" width="${band}" height="${ih}" class="hit" data-tip="${esc(`<b>${monthName(d.k)}</b><br>Eingegangen: ${eur(d.ist)}<br>Soll: ${eur(d.soll)}${d.soll ? ` (${quote} %)` : ""}${d.laufend ? "<br><i>Monat läuft noch</i>" : ""}`)}"/>`;
+    });
+    return svg + "</svg>";
+  }
+
+  function hbalken(rows) {
+    const max = Math.max(...rows.map((r) => r.wert), 1);
+    return `<div class="hbars">${rows.map((r) => `
+      <div class="hrow" data-tip="${esc(`<b>${esc(r.label)}</b><br>${r.tip}`)}">
+        <div class="hlabel" title="${esc(r.label)}">${esc(r.label)}</div>
+        <div class="htrack"><div class="hfill" style="width:${Math.max(1, (r.wert / max) * 100)}%"></div><span class="hval">${eur0(r.wert)}</span></div>
+      </div>`).join("")}</div>`;
+  }
+
+  function meter(anteil, art = "") {
+    return `<div class="meter ${art}"><div style="width:${Math.max(0, Math.min(100, anteil * 100))}%"></div></div>`;
+  }
+
   views.uebersicht = () => {
     const gs = db.garagen;
-    const st = { frei: 0, vermietet: 0, gekuendigt: 0 };
-    gs.forEach((g) => st[garageStatus(g)]++);
-    const laufend = db.vertraege.filter((v) => v.status === "aktiv" || v.status === "gekuendigt");
-    const soll = laufend.filter((v) => istEigen(garageById(v.garageId))).reduce((s, v) => s + gesamt(v), 0);
-    const sollFremd = laufend.filter((v) => !istEigen(garageById(v.garageId))).reduce((s, v) => s + gesamt(v), 0);
-    let offenSumme = 0, offenMieter = 0;
-    laufend.forEach((v) => { const o = offeneMonate(v); if (o.length) { offenMieter++; offenSumme += o.length * gesamt(v); } });
-    const auszuege = db.vertraege.filter((v) => v.status === "gekuendigt").sort((a, b) => (a.endeZum || "").localeCompare(b.endeZum || ""));
-
-    let html = `<div class="toolbar" style="margin:0"><div class="grow"><h1>Übersicht</h1><p class="sub">${db.standorte.length} Standorte · ${gs.length} Garagen</p></div>${gs.length ? '<button class="btn primary" id="quickV">+ Neuer Mietvertrag</button>' : ""}</div>
-    <div class="cards">
-      <div class="card"><div class="lbl">Vermietet</div><div class="val">${st.vermietet + st.gekuendigt}</div></div>
-      <div class="card"><div class="lbl">Frei</div><div class="val">${st.frei}</div></div>
-      <div class="card"><div class="lbl">Gekündigt</div><div class="val">${st.gekuendigt}</div></div>
-      <div class="card"><div class="lbl">Sollmiete / Monat</div><div class="val">${eur(soll)}</div>${sollFremd ? `<div class="lbl">+ ${eur(sollFremd)} für andere Eigentümer</div>` : ""}</div>
-      <div class="card"><div class="lbl">Offene Mieten</div><div class="val" style="color:${offenSumme ? "var(--danger)" : "inherit"}">${eur(offenSumme)}</div><div class="lbl">${offenMieter} Mieter</div></div>
-    </div>`;
-
     if (!gs.length) {
-      html += `<div class="panel empty">Noch keine Garagen angelegt.<br><br><button class="btn primary" id="goGaragen">Standort &amp; Garagen anlegen</button></div>`;
-      $("#view").innerHTML = html;
+      $("#view").innerHTML = `<h1>Übersicht</h1><div class="panel empty">Noch keine Garagen angelegt.<br><br><button class="btn primary" id="goGaragen">Standort &amp; Garagen anlegen</button></div>`;
       $("#goGaragen").onclick = () => show("garagen");
       return;
     }
-
-    if (auszuege.length) {
-      html += `<div class="panel"><div class="panel-head"><h2>Anstehende Auszüge</h2></div><div class="table-wrap"><table><tbody>
-      ${auszuege.map((v) => { const g = garageById(v.garageId) || {}; return `<tr><td>${esc(standortById(g.standortId).name)} · Nr. ${esc(g.nummer)}</td><td>${esc(mieterName(mieterById(v.mieterId)))}</td><td class="num">zum ${dfmt(v.endeZum)}</td><td class="act"><button class="btn small" data-end="${v.id}">Rückgabe erledigt</button></td></tr>`; }).join("")}
-      </tbody></table></div></div>`;
+    const km = monthKey(today());
+    const eigen = gs.filter(istEigen);
+    const laufend = db.vertraege.filter((v) => v.status === "aktiv" || v.status === "gekuendigt");
+    const laufEigen = laufend.filter((v) => istEigen(garageById(v.garageId)));
+    const sollEigen = laufEigen.reduce((s, v) => s + gesamt(v), 0);
+    const sollFremd = laufend.reduce((s, v) => s + gesamt(v), 0) - sollEigen;
+    const kostenMonat = eigen.reduce((s, g) => s + kostenJahr(g), 0) / 12;
+    const ueberschuss = sollEigen - kostenMonat;
+    const st = { frei: 0, vermietet: 0, gekuendigt: 0 };
+    gs.forEach((g) => st[garageStatus(g)]++);
+    const belegt = st.vermietet + st.gekuendigt;
+    // offene Mieten
+    const offen = laufend.concat(db.vertraege.filter((v) => v.status === "beendet" && v.endeZum && v.endeZum >= addDays(today(), -180)))
+      .map((v) => ({ v, ks: offeneMonate(v) })).filter((x) => x.ks.length)
+      .map((x) => ({ ...x, betrag: x.ks.length * gesamt(x.v) })).sort((a, b) => b.betrag - a.betrag);
+    const offenSumme = offen.reduce((s, x) => s + x.betrag, 0);
+    // laufender Monat
+    const sollJetzt = db.vertraege.reduce((s, v) => s + sollImMonat(v, km), 0);
+    const istJetzt = db.vertraege.reduce((s, v) => s + (bezahlt(v.id, km) ? gesamt(v) : 0), 0);
+    // Rendite
+    const mitKp = eigen.filter((g) => num(g.kaufpreis) > 0);
+    const kpSumme = mitKp.reduce((s, g) => s + num(g.kaufpreis), 0);
+    const rendite = kpSumme ? mitKp.reduce((s, g) => { const v = laufenderVertrag(g.id); return s + (v ? gesamt(v) * 12 : 0) - kostenJahr(g); }, 0) / kpSumme : null;
+    // Verlauf: ab erstem erfassten Monat, max. 12 Monate
+    const startK = db.vertraege.map((v) => v.zahlungenAb).filter(Boolean).sort()[0] || km;
+    let von = addMonths(km, -11);
+    if (von < startK) von = startK;
+    const verlauf = [];
+    for (let k = von; k <= km; k = addMonths(k, 1)) {
+      verlauf.push({ k, laufend: k === km, soll: db.vertraege.reduce((s, v) => s + sollImMonat(v, k), 0), ist: db.vertraege.reduce((s, v) => s + (bezahlt(v.id, k) ? gesamt(v) : 0), 0) });
     }
+    // Einnahmen je Standort
+    const proStandort = db.standorte.map((s) => {
+      const vs = laufend.filter((v) => garageById(v.garageId)?.standortId === s.id);
+      const n = gs.filter((g) => g.standortId === s.id).length;
+      return { label: s.name, wert: vs.reduce((a, v) => a + gesamt(v), 0), tip: `${vs.length} von ${n} Garagen vermietet<br>${eur(vs.reduce((a, v) => a + gesamt(v), 0))} pro Monat` };
+    }).filter((r) => r.wert > 0).sort((a, b) => b.wert - a.wert);
+    const standortRows = proStandort.slice(0, 10);
+    const standortRest = proStandort.slice(10);
+    const auszuege = db.vertraege.filter((v) => v.status === "gekuendigt").sort((a, b) => (a.endeZum || "").localeCompare(b.endeZum || ""));
+    const offenePunkte = gs.filter((g) => /OFFEN:/.test(g.notiz || "")).length;
+    const leerVerlust = gs.filter((g) => garageStatus(g) === "frei").reduce((s, g) => s + num(g.miete) + num(g.nebenkosten), 0);
+    const pct = (a) => Math.round(a * 100) + " %";
+    const gName = (v) => { const g = garageById(v.garageId) || {}; return `${standortById(g.standortId).name}${g.nummer && !/^o\./.test(g.nummer) ? " · " + g.nummer : ""}`; };
 
-    html += `<div class="legend"><span class="l-frei">frei</span><span class="l-verm">vermietet</span><span class="l-gek">gekündigt</span></div>`;
-    db.standorte.slice().sort((a, b) => a.name.localeCompare(b.name, "de")).forEach((s) => {
-      const list = gs.filter((g) => g.standortId === s.id).sort(sortGaragen);
-      const frei = list.filter((g) => garageStatus(g) === "frei").length;
-      const warte = db.warteliste.filter((w) => !w.standortId || w.standortId === s.id).length;
-      html += `<div class="panel"><div class="panel-head"><h2>${esc(s.name)}</h2><span class="meta">${esc(s.adresse)} · ${list.length} Garagen · ${frei} frei${warte ? ` · ${warte} auf Warteliste` : ""}</span></div>
-      <div class="tiles">${list.map((g) => {
-        const stt = garageStatus(g);
-        const v = laufenderVertrag(g.id);
-        const m = v && mieterById(v.mieterId);
-        return `<button class="tile ${stt}" data-g="${g.id}"><div class="nr">${esc(g.typ === "Stellplatz" ? "SP " : "")}${esc(g.nummer)}</div><div class="who">${m ? esc(m.nachname || mieterName(m)) : "frei"}</div></button>`;
-      }).join("") || '<span class="hint">Keine Garagen an diesem Standort.</span>'}</div></div>`;
-    });
-    $("#view").innerHTML = html;
-    $$(".tile").forEach((t) => (t.onclick = () => garageDetail(t.dataset.g)));
-    if ($("#quickV")) $("#quickV").onclick = () => schnellVertrag();
+    $("#view").innerHTML = `
+    <div class="dash-head">
+      <div><h1>Übersicht</h1><p class="sub">${new Date().toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}</p></div>
+      <div class="toolbar" style="margin:0"><button class="btn" id="dImport">Kontoauszug einlesen</button><button class="btn primary" id="quickV">+ Neuer Mietvertrag</button></div>
+    </div>
+    <div class="dash">
+      <section class="card hero span-5">
+        <div class="lbl">Überschuss pro Monat</div>
+        <div class="hero-val">${eur0(ueberschuss)}</div>
+        <div class="hero-sub">${eur0(sollEigen)} Mieteinnahmen − ${eur0(kostenMonat)} Kosten · ${eigen.length} eigene Garagen</div>
+        <div class="hero-sub muted">${eur0(ueberschuss * 12)} im Jahr${sollFremd ? ` · zusätzlich ${eur0(sollFremd)}/Monat für andere Eigentümer` : ""}</div>
+      </section>
+      <section class="card kpi span-7">
+        <div class="kpis">
+          <div><div class="lbl">Auslastung</div><div class="kval">${pct(belegt / gs.length)}</div>${meter(belegt / gs.length)}<div class="ksub">${belegt} von ${gs.length} vermietet</div></div>
+          <div><div class="lbl">Eingang ${monthName(km).split(" ")[0]}</div><div class="kval">${eur0(istJetzt)}</div>${meter(sollJetzt ? istJetzt / sollJetzt : 0)}<div class="ksub">von ${eur0(sollJetzt)} Soll</div></div>
+          <div><div class="lbl">Offene Mieten</div><div class="kval">${eur0(offenSumme)}</div><div class="status ${offenSumme ? "bad" : "good"}">${offenSumme ? `⚠ ${offen.length} Mieter im Rückstand` : "✓ alles bezahlt"}</div></div>
+          <div><div class="lbl">Rendite</div><div class="kval">${rendite === null ? "–" : pct(rendite)}</div><div class="ksub">${mitKp.length ? `auf Kaufpreis (${mitKp.length} Garagen)` : "Kaufpreise fehlen"}</div></div>
+        </div>
+      </section>
+
+      <section class="card span-8">
+        <div class="card-head"><h2>Mieteingänge</h2><div class="legend2"><span class="k-bar"></span>Eingegangen <span class="k-soll"></span>Soll</div></div>
+        ${verlauf.length >= 1 ? saeulen(verlauf) : ""}
+        ${verlauf.length < 3 ? `<p class="hint">Zahlungen werden seit ${monthName(startK)} erfasst. Mit jedem eingelesenen Kontoauszug wächst der Verlauf.</p>` : ""}
+      </section>
+      <section class="card span-4">
+        <div class="card-head"><h2>Belegung</h2></div>
+        <div class="stack">${[["vermietet", st.vermietet], ["gekuendigt", st.gekuendigt], ["frei", st.frei]].filter(([, n]) => n).map(([k, n]) => `<div class="seg ${k}" style="flex:${n}" data-tip="${esc(`<b>${statusLabel[k]}</b>: ${n} Garagen`)}"></div>`).join("")}</div>
+        <ul class="leg">
+          <li><span class="sw vermietet"></span>Vermietet<b>${st.vermietet}</b></li>
+          <li><span class="sw gekuendigt"></span>Gekündigt<b>${st.gekuendigt}</b></li>
+          <li><span class="sw frei"></span>Frei<b>${st.frei}</b></li>
+        </ul>
+        <div class="mini">
+          <div><span>Leerstand kostet</span><b>${eur0(leerVerlust)}/Monat</b></div>
+          <div><span>Warteliste</span><b>${db.warteliste.length}</b></div>
+          <div><span>Offene Punkte in Notizen</span><b>${offenePunkte}</b></div>
+        </div>
+      </section>
+
+      <section class="card span-6">
+        <div class="card-head"><h2>Einnahmen je Standort</h2><span class="meta">pro Monat</span></div>
+        ${standortRows.length ? hbalken(standortRows) : '<p class="hint">Noch keine laufenden Verträge.</p>'}
+        ${standortRest.length ? `<p class="hint" data-tip="${esc(standortRest.map((r) => `${esc(r.label)}: ${eur(r.wert)}`).join("<br>"))}">+ ${standortRest.length} weitere Standorte mit zusammen ${eur0(standortRest.reduce((a, r) => a + r.wert, 0))} pro Monat</p>` : ""}
+      </section>
+      <section class="card span-6">
+        <div class="card-head"><h2>Rückstände</h2>${offen.length ? `<button class="btn small" id="toPay">Zu den Mieteingängen</button>` : ""}</div>
+        ${offen.length ? `<table class="compact"><tbody>${offen.slice(0, 8).map((x) => `<tr data-brief="${x.v.id}" style="cursor:pointer"><td><b>${esc(mieterName(mieterById(x.v.mieterId)))}</b><div class="hint" style="margin:0">${esc(gName(x.v))}</div></td><td>${x.ks.map(mKurz).join(", ")}</td><td class="num"><b>${eur(x.betrag)}</b></td></tr>`).join("")}</tbody></table>${offen.length > 8 ? `<p class="hint">+ ${offen.length - 8} weitere</p>` : ""}`
+          : '<p class="good-note">✓ Keine Rückstände.</p>'}
+        ${auszuege.length ? `<h3>Anstehende Auszüge</h3><table class="compact"><tbody>${auszuege.map((v) => `<tr><td><b>${esc(mieterName(mieterById(v.mieterId)))}</b><div class="hint" style="margin:0">${esc(gName(v))}</div></td><td class="num">zum ${dfmt(v.endeZum)}</td><td class="act"><button class="btn small" data-end="${v.id}">Rückgabe erledigt</button></td></tr>`).join("")}</tbody></table>` : ""}
+      </section>
+    </div>`;
+    $("#quickV").onclick = () => schnellVertrag();
+    $("#dImport").onclick = () => show("zahlungen");
+    if ($("#toPay")) $("#toPay").onclick = () => show("zahlungen");
     $$("[data-end]").forEach((b) => (b.onclick = () => vertragBeenden(b.dataset.end)));
+    $$("tr[data-brief]").forEach((tr) => (tr.onclick = () => briefForm(tr.dataset.brief)));
   };
+
+  // Tooltip für Diagramme (Maus und Touch)
+  (() => {
+    const tip = document.createElement("div");
+    tip.id = "tip";
+    document.body.appendChild(tip);
+    const hide = () => (tip.style.opacity = 0);
+    const showTip = (e) => {
+      const el = e.target.closest && e.target.closest("[data-tip]");
+      if (!el) return hide();
+      tip.innerHTML = el.dataset.tip;
+      tip.style.opacity = 1;
+      const x = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
+      const y = e.clientY - tip.offsetHeight - 12 < 4 ? e.clientY + 16 : e.clientY - tip.offsetHeight - 12;
+      tip.style.left = x + "px"; tip.style.top = y + "px";
+      $$(".hit.on, .hrow.on").forEach((n) => n.classList.remove("on"));
+      el.classList.add("on");
+    };
+    document.addEventListener("pointermove", showTip);
+    document.addEventListener("pointerdown", showTip);
+    document.addEventListener("scroll", hide, true);
+  })();
 
   /* ================= Garagen & Standorte ================= */
   let garagenFilter = { standort: "", q: "" };
@@ -934,7 +1075,6 @@
   let imp = null;
   const laufendeVertraege = () => db.vertraege.filter((v) => v.status !== "beendet" || (v.endeZum && v.endeZum >= addDays(today(), -150)));
   const passt = (betrag, summe) => summe > 0 && Math.round(betrag / summe) >= 1 && Math.abs(betrag / summe - Math.round(betrag / summe)) < 0.001;
-  const mKurz = (k) => { const [y, m] = k.split("-"); return `${m}.${y}`; };
 
   function monateFuer(v, buchung, n, reserviert) {
     const start = v.zahlungenAb || monthKey(v.beginn);
