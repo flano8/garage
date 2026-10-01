@@ -143,3 +143,17 @@ legend { font-size: 13px; font-weight: 600; color: var(--ink-strong); padding: 0
   .grid, .sig { grid-template-columns: 1fr; }
   nav button { padding: 6px 9px; font-size: 14px; }
 }
+
+.geo-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.geo-row input { flex: 1; min-width: 200px; }
+a.btn { text-decoration: none; display: inline-flex; align-items: center; }
+.files { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 10px; }
+.file { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.file .thumb { display: flex; align-items: center; justify-content: center; aspect-ratio: 4 / 3; border-radius: 8px; overflow: hidden; background: #f1eee8; border: 1px solid var(--line); text-decoration: none; }
+.file .thumb img { width: 100%; height: 100%; object-fit: cover; }
+.file .ficon { font-weight: 700; font-size: 13px; color: var(--danger); letter-spacing: .5px; }
+.file .fname { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file .fmeta { font-size: 11.5px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
+.linkbtn { background: none; border: 0; color: var(--muted); cursor: pointer; font: inherit; padding: 0 2px; }
+.linkbtn:hover { color: var(--danger); }
+th { white-space: nowrap; }

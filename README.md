@@ -26,3 +26,11 @@ Beim Erfassen bestehender Verträge „Auf Papier unterschrieben“ anhaken und 
 ## Hinweis
 
 Die Vertrags- und Kündigungstexte orientieren sich am bisherigen Formular, sind aber keine Rechtsberatung. Vor dem ersten Einsatz einmal prüfen lassen, z. B. über Haus & Grund.
+
+## Neu in Version 3
+
+- **Garagen-Akte:** Fotos und Dateien pro Garage (Netlify Function `files.mjs`, Store `garagen-dateien`, max. 5 MB pro Datei, Fotos werden automatisch verkleinert). Erzeugte Verträge, Kündigungen und Mahnungen werden automatisch abgelegt.
+- **Geodaten:** Standort per Handy-GPS aufnehmen oder Koordinaten bzw. Google-Maps-Link einfügen, dann Navigation per Klick.
+- **Weitere Eigentümer** (Einstellungen): Für deren Garagen stehen sie im Vertrag als Vermieter.
+- **Nebenkostenpauschale** im Vertrag, **Kosten pro Garage** (Pacht, Grundsteuer, Beitrag, Hausgeld, Sonstiges) und **Kaufpreis**, daraus die Ansicht „Rendite“.
+- **Daten ergänzen:** Eine Import-Datei fügt Einträge hinzu, ohne Vorhandenes zu überschreiben.

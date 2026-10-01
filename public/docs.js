@@ -3,6 +3,9 @@ window.Docs = (() => {
   const { jsPDF } = window.jspdf;
   const ML = 22, MR = 20, MT = 20, MB = 22, PW = 210, PH = 297, CW = PW - ML - MR;
 
+  const num = (v) => { const n = parseFloat(String(v ?? "").replace(",", ".")); return isNaN(n) ? 0 : n; };
+  // "Nr. 37" – entfällt, wenn keine Nummer bekannt ist ("o. Nr.")
+  const nrTxt = (g) => (g.nummer && !/^o\.?\s?nr/i.test(String(g.nummer)) ? ` Nr. ${g.nummer}` : "");
   const eur = (n) => Number(n || 0).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const d = (iso) => {
     if (!iso) return "";
@@ -97,7 +100,7 @@ window.Docs = (() => {
   /* ---------------- Mietvertrag ---------------- */
   function mietvertrag({ v, garage, standort, mieter, s }) {
     const objekt = garage.typ === "Stellplatz" ? "Stellplatz" : "Garage";
-    const w = writer(`Mietvertrag ${v.nr} · ${objekt} Nr. ${garage.nummer} · ${standort.name}`);
+    const w = writer(`Mietvertrag ${v.nr} · ${objekt}${nrTxt(garage)} · ${standort.name}`);
     w.text(`Mietvertrag über ${objekt === "Garage" ? "eine Garage" : "einen Stellplatz"}`, { size: 18, bold: true, gap: 1 });
     w.text(`Vertragsnummer ${v.nr}`, { size: 9.5, color: [110, 110, 110], gap: 6 });
 
@@ -115,24 +118,27 @@ window.Docs = (() => {
     const H = (t) => w.heading(`§ ${++p} ${t}`);
 
     H("Mietobjekt");
-    w.clause(1, `Der Vermieter vermietet dem Mieter zum Abstellen eines Kraftfahrzeugs bis zu einem zulässigen Gesamtgewicht von ${v.gesamtgewicht || garage.gesamtgewicht || "2"} Tonnen ${objekt === "Garage" ? "die Garage" : "den Stellplatz"} Nr. ${garage.nummer} auf dem Grundstück ${standort.adresse}${standort.name && standort.name !== standort.adresse ? ` (Standort „${standort.name}“)` : ""}.`);
+    w.clause(1, `Der Vermieter vermietet dem Mieter zum Abstellen eines Kraftfahrzeugs bis zu einem zulässigen Gesamtgewicht von ${v.gesamtgewicht || garage.gesamtgewicht || "2"} Tonnen ${objekt === "Garage" ? "die Garage" : "den Stellplatz"}${nrTxt(garage)} auf dem Grundstück ${standort.adresse}${standort.name && standort.name !== standort.adresse ? ` (Standort „${standort.name}“)` : ""}.`);
     if (garage.groesse) w.clause(2, `Die Fläche beträgt ca. ${garage.groesse} m².`);
     if (mieter.kennzeichen) w.clause(garage.groesse ? 3 : 2, `Abgestellt wird das Fahrzeug mit dem amtlichen Kennzeichen ${mieter.kennzeichen}. Ein Fahrzeugwechsel ist dem Vermieter mitzuteilen.`);
 
     H("Mietdauer und Kündigung");
-    w.clause(1, `Das Mietverhältnis beginnt am ${d(v.beginn)}. Es läuft auf unbestimmte Zeit und kann von jeder Vertragspartei mit einer Frist von drei Monaten zum Ende eines Kalendermonats gekündigt werden. Die Kündigung muss spätestens am dritten Werktag des ersten Monats der Kündigungsfrist bei der anderen Vertragspartei eingegangen sein.${v.erstmalsZum ? ` Die Kündigung ist beiderseits erstmals zum ${d(v.erstmalsZum)} zulässig.` : ""}`);
+    w.clause(1, `Das Mietverhältnis beginnt am ${v.beginn ? d(v.beginn) : "__________"}. Es läuft auf unbestimmte Zeit und kann von jeder Vertragspartei mit einer Frist von drei Monaten zum Ende eines Kalendermonats gekündigt werden. Die Kündigung muss spätestens am dritten Werktag des ersten Monats der Kündigungsfrist bei der anderen Vertragspartei eingegangen sein.${v.erstmalsZum ? ` Die Kündigung ist beiderseits erstmals zum ${d(v.erstmalsZum)} zulässig.` : ""}`);
     w.clause(2, "Setzt der Mieter den Gebrauch der Mietsache nach Ablauf der Mietzeit fort, gilt das Mietverhältnis nicht als verlängert. § 545 BGB findet keine Anwendung. Eine Verlängerung bedarf einer schriftlichen Vereinbarung.");
     w.clause(3, "Die Kündigung bedarf der Schriftform. Das Recht zur außerordentlichen fristlosen Kündigung aus wichtigem Grund bleibt unberührt.");
 
     H("Miete");
-    w.clause(1, `Die monatliche Miete beträgt ${eur(v.miete)} Euro (in Worten: ${zahlwort(v.miete)}).`);
-    w.clause(2, "Der Vermieter ist Kleinunternehmer im Sinne des § 19 UStG. Umsatzsteuer wird daher nicht berechnet.");
+    let a3 = 0;
+    const nk = num(v.nebenkosten);
+    w.clause(++a3, `Die monatliche Miete beträgt ${eur(v.miete)} Euro (in Worten: ${zahlwort(v.miete)}).`);
+    if (nk > 0) w.clause(++a3, `Zusätzlich zahlt der Mieter eine monatliche Nebenkostenpauschale von ${eur(nk)} Euro. Die monatliche Gesamtzahlung beträgt somit ${eur(num(v.miete) + nk)} Euro. Über die Pauschale wird nicht abgerechnet.`);
+    if (s.kleinunternehmer !== false) w.clause(++a3, "Der Vermieter ist Kleinunternehmer im Sinne des § 19 UStG. Umsatzsteuer wird daher nicht berechnet.");
 
     H("Zahlungsweise");
     const konto = s.iban
-      ? `auf folgendem Konto des Vermieters eingeht:\nKontoinhaber: ${s.kontoinhaber || s.name}\nBank: ${s.bank || ""}\nIBAN: ${s.iban}${s.bic ? `   BIC: ${s.bic}` : ""}\nVerwendungszweck: Garage ${garage.nummer} ${standort.name} / ${mieter.nachname}`
+      ? `auf folgendem Konto des Vermieters eingeht:\nKontoinhaber: ${s.kontoinhaber || s.name}\nBank: ${s.bank || ""}\nIBAN: ${s.iban}${s.bic ? `   BIC: ${s.bic}` : ""}\nVerwendungszweck: Garage${nrTxt(garage).replace(" Nr.", "")} ${standort.name} / ${mieter.nachname}`
       : "auf einem vom Vermieter benannten Konto eingeht.";
-    w.clause(0, `Die Miete ist monatlich im Voraus, porto- und spesenfrei, so rechtzeitig zu überweisen, dass der Betrag spätestens am dritten Werktag eines jeden Monats ${konto}`);
+    w.clause(0, `${nk > 0 ? "Die Gesamtzahlung" : "Die Miete"} ist monatlich im Voraus, porto- und spesenfrei, so rechtzeitig zu überweisen, dass der Betrag spätestens am dritten Werktag eines jeden Monats ${konto}`);
     w.clause(0, "Verzögerungen, die auf einem Verschulden der beteiligten Banken beruhen, hat der Mieter nicht zu vertreten.");
 
     H("Schlüssel und Transponder");
@@ -261,13 +267,13 @@ window.Docs = (() => {
   }
 
   function objektText(garage, standort) {
-    return `${garage.typ === "Stellplatz" ? "Stellplatz" : "Garage"} Nr. ${garage.nummer}, ${standort.adresse}`;
+    return `${garage.typ === "Stellplatz" ? "Stellplatz" : "Garage"}${nrTxt(garage)}, ${standort.adresse}`;
   }
 
   function kuendigungOrdentlich({ v, garage, standort, mieter, s, k }) {
     return letter({
       s, mieter, datum: k.datum, ort: k.ort, sigImage: k.mitUnterschrift ? s.sigVermieter : null,
-      betreff: `Kündigung des Mietvertrags vom ${d(v.beginn)} – ${objektText(garage, standort)}`,
+      betreff: `Kündigung des Mietvertrags${v.beginn ? ` vom ${d(v.beginn)}` : ""} – ${objektText(garage, standort)}`,
       absaetze: [
         `hiermit kündige ich den mit Ihnen geschlossenen Mietvertrag über die ${objektText(garage, standort)} fristgerecht zum ${d(k.zum)}.`,
         `Bitte geben Sie das Mietobjekt zu diesem Termin vollständig geräumt und sauber zurück und händigen Sie mir sämtliche Schlüssel${v.transponder > 0 ? " und Transponder" : ""} aus, auch selbst beschaffte. Für einen Übergabetermin melden Sie sich bitte rechtzeitig bei mir${s.telefon ? ` unter ${s.telefon}` : ""}.`,
@@ -285,7 +291,7 @@ window.Docs = (() => {
       s, mieter, datum: k.datum, ort: k.ort, sigImage: k.mitUnterschrift ? s.sigVermieter : null,
       betreff: `Fristlose Kündigung – ${objektText(garage, standort)}`,
       absaetze: [
-        `hiermit kündige ich den mit Ihnen geschlossenen Mietvertrag vom ${d(v.beginn)} über die ${objektText(garage, standort)} außerordentlich fristlos, hilfsweise ordentlich zum nächstmöglichen Termin, das ist der ${d(k.hilfsweiseZum)}.`,
+        `hiermit kündige ich den mit Ihnen geschlossenen Mietvertrag${v.beginn ? ` vom ${d(v.beginn)}` : ""} über die ${objektText(garage, standort)} außerordentlich fristlos, hilfsweise ordentlich zum nächstmöglichen Termin, das ist der ${d(k.hilfsweiseZum)}.`,
         grund,
         `Ich fordere Sie auf, das Mietobjekt bis spätestens ${d(k.raeumungBis)} vollständig geräumt herauszugeben und sämtliche Schlüssel${v.transponder > 0 ? " und Transponder" : ""} zurückzugeben.${k.grund === "zahlungsverzug" ? ` Den rückständigen Betrag von ${eur(k.betrag)} Euro fordere ich weiterhin ein.` : ""}`,
         "Einer stillschweigenden Verlängerung des Mietverhältnisses gemäß § 545 BGB widerspreche ich bereits jetzt ausdrücklich. Das Mietverhältnis verlängert sich auch dann nicht, wenn Sie den Gebrauch des Mietobjekts nach Ablauf der Mietzeit fortsetzen.",
@@ -300,7 +306,7 @@ window.Docs = (() => {
       betreff: `${k.stufe || "Zahlungserinnerung"} – Miete ${objektText(garage, standort)}`,
       absaetze: [
         `für die von Ihnen gemietete ${objektText(garage, standort)} konnte ich für ${k.monate} keinen Zahlungseingang feststellen. Offen ist derzeit ein Betrag von ${eur(k.betrag)} Euro.`,
-        `Bitte überweisen Sie den Betrag bis spätestens ${d(k.frist)}${s.iban ? ` auf mein Konto:\nIBAN ${s.iban}${s.bank ? ` (${s.bank})` : ""}\nVerwendungszweck: Garage ${garage.nummer} ${standort.name} / ${mieter.nachname}` : "."}`,
+        `Bitte überweisen Sie den Betrag bis spätestens ${d(k.frist)}${s.iban ? ` auf mein Konto:\nIBAN ${s.iban}${s.bank ? ` (${s.bank})` : ""}\nVerwendungszweck: Garage${nrTxt(garage).replace(" Nr.", "")} ${standort.name} / ${mieter.nachname}` : "."}`,
         "Sollte sich Ihre Zahlung mit diesem Schreiben überschnitten haben, betrachten Sie es bitte als gegenstandslos.",
         k.zusatz,
       ],
