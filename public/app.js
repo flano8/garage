@@ -84,36 +84,85 @@
     }
   }
 
+  let pending = false, saving = false, konflikt = false;
   function save() {
     clearTimeout(saveTimer);
+    pending = true;
     setSync("Speichert …");
-    saveTimer = setTimeout(doSave, 500);
+    saveTimer = setTimeout(doSave, 400);
   }
+  // Vor dem Schließen warnen, falls noch nicht gespeichert
+  window.addEventListener("beforeunload", (e) => { if (pending || saving) { e.preventDefault(); e.returnValue = ""; } });
+  // Beim Zurückkehren zur App neuesten Stand vom Server holen (z. B. Änderungen vom Handy)
+  document.addEventListener("visibilitychange", async () => {
+    if (document.visibilityState !== "visible" || mode !== "server" || pending || saving || konflikt) return;
+    try {
+      const r = await fetch("/api/db", { cache: "no-store" });
+      const doc = await r.json();
+      if (doc.version > version && doc.data) {
+        version = doc.version;
+        db = Object.assign(emptyDb(), doc.data);
+        db.settings = Object.assign(emptyDb().settings, db.settings || {});
+        if (!modal.open) rerender();
+        toast("Neuester Stand geladen");
+      }
+    } catch (_) { /* offline */ }
+  });
 
   async function doSave() {
+    if (saving) { saveTimer = setTimeout(doSave, 300); return; }
+    pending = false;
     if (mode === "local") {
       try { localStorage.setItem(LOCAL_KEY, JSON.stringify(db)); setSync("Lokal gespeichert"); }
       catch (e) { setSync("Speichern fehlgeschlagen", true); }
       return;
     }
+    saving = true;
     try {
-      const r = await fetch("/api/db", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ version, data: db }),
-      });
+      const body = JSON.stringify({ version, data: db });
+      const r = await fetch("/api/db", { method: "PUT", headers: { "Content-Type": "application/json" }, body });
       if (r.status === 409) {
-        setSync("Konflikt – bitte neu laden", true);
-        alertModal("Zwischenzeitlich gespeichert", "Jemand anderes hat in der Zwischenzeit Änderungen gespeichert. Bitte lade die Seite neu, damit nichts überschrieben wird. Deine letzte Änderung ist dann noch einmal einzutragen.");
-        return;
+        const res = await r.json().catch(() => ({}));
+        saving = false;
+        return konfliktLoesen(res.current);
       }
+      if (r.status === 413) throw new Error("zu groß");
       if (!r.ok) throw new Error(r.status);
       const res = await r.json();
       version = res.version;
+      konflikt = false;
       setSync("Gespeichert " + new Date(res.savedAt).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }));
     } catch (e) {
-      setSync("Nicht gespeichert – Verbindung prüfen", true);
+      pending = true;
+      setSync("NICHT gespeichert – bitte Verbindung prüfen", true);
+      toast(e.message === "zu groß" ? "Speichern fehlgeschlagen: Datenmenge zu groß" : "Speichern fehlgeschlagen – nächster Versuch in 10 Sekunden");
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(doSave, 10000);
     }
+    saving = false;
+  }
+
+  // Anderes Gerät/Tab hat zwischenzeitlich gespeichert
+  function konfliktLoesen(current) {
+    if (konflikt) return;
+    konflikt = true;
+    setSync("Konflikt – bitte entscheiden", true);
+    const zeit = current?.savedAt ? new Date(current.savedAt).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" }) : "kürzlich";
+    openModal("Auf einem anderen Gerät wurde gespeichert", `
+      <p>Die Daten wurden am <b>${esc(zeit)}</b> auf einem anderen Gerät oder in einem anderen Browser-Tab geändert. Deine letzte Änderung hier ist deshalb <b>noch nicht gespeichert</b>.</p>
+      <p><b>Meinen Stand speichern</b> – übernimmt alles so, wie du es hier gerade siehst (inkl. deiner letzten Änderung). Änderungen vom anderen Gerät seit dem letzten Laden gehen dabei verloren.</p>
+      <p><b>Anderen Stand laden</b> – zeigt den Stand vom anderen Gerät. Deine letzte Änderung hier musst du dann noch einmal machen.</p>
+      <p class="hint">Tipp: Die App nur auf einem Gerät gleichzeitig bearbeiten, oder vorher neu laden.</p>`,
+      [{ label: "Anderen Stand laden", onClick: () => {
+          konflikt = false; pending = false;
+          if (current?.data) { version = current.version; db = Object.assign(emptyDb(), current.data); db.settings = Object.assign(emptyDb().settings, db.settings || {}); }
+          setSync("Stand vom anderen Gerät geladen"); rerender();
+        } },
+       { label: "Meinen Stand speichern", cls: "primary", onClick: () => {
+          konflikt = false;
+          if (current) version = current.version;
+          save();
+        } }]);
   }
 
   /* ================= Abgeleitete Werte ================= */
@@ -284,7 +333,13 @@
     return {
       clear() { ctx.clearRect(0, 0, canvas.width, canvas.height); dirty = false; initial = null; },
       load(src) { this.clear(); if (!src) return; const img = new Image(); img.onload = () => ctx.drawImage(img, 0, 0, canvas.width, canvas.height); img.src = src; dirty = true; },
-      value() { return dirty ? canvas.toDataURL("image/png") : null; },
+      value() {
+        if (!dirty) return null;
+        const c = document.createElement("canvas");
+        c.width = 600; c.height = 200;
+        c.getContext("2d").drawImage(canvas, 0, 0, 600, 200);
+        return c.toDataURL("image/png");
+      },
     };
   }
 
@@ -493,6 +548,56 @@
     document.addEventListener("scroll", hide, true);
   })();
 
+  /* ================= Löschen (mit allem, was dazugehört) ================= */
+  function loeschDialog({ titel, garagen = [], mieterIds = [], hinweis = "", onDone }) {
+    const gids = new Set(garagen.map((g) => g.id));
+    const vs = db.vertraege.filter((v) => gids.has(v.garageId) || mieterIds.includes(v.mieterId));
+    const vids = new Set(vs.map((v) => v.id));
+    const laufend = vs.filter((v) => v.status !== "beendet");
+    const zahlungen = vs.reduce((n, v) => n + Object.keys(db.zahlungen[v.id] || {}).length, 0);
+    const dateien = garagen.reduce((n, g) => n + (g.dateien || []).length, 0);
+    const betroffen = [...new Set(vs.map((v) => v.mieterId))].filter((mid) => !mieterIds.includes(mid));
+    const verwaist = betroffen.filter((mid) => !db.vertraege.some((v) => v.mieterId === mid && !vids.has(v.id)));
+    const leer = [...new Set(garagen.map((g) => g.standortId))].filter((sid) => !db.garagen.some((g) => g.standortId === sid && !gids.has(g.id)));
+    const leerNamen = leer.map((sid) => standortById(sid).name);
+    const zeilen = [
+      garagen.length ? `${garagen.length} Garage(n)` : "",
+      mieterIds.length ? `${mieterIds.length} Mieter` : "",
+      vs.length ? `${vs.length} Vertrag/Verträge${laufend.length ? ` – davon <b>${laufend.length} laufend</b>` : ""}` : "",
+      zahlungen ? `${zahlungen} erfasste Mietzahlung(en)` : "",
+      dateien ? `${dateien} Datei(en) aus der Akte` : "",
+    ].filter(Boolean);
+    openModal(titel, `
+      ${hinweis ? `<p>${hinweis}</p>` : ""}
+      <p>Folgendes wird <b>endgültig gelöscht</b>:</p>
+      <ul>${zeilen.map((z) => `<li>${z}</li>`).join("")}</ul>
+      ${leer.length && !onDone ? check("mitStandort", `Danach leeren Standort ebenfalls entfernen (${leerNamen.join(", ")})`, true) : ""}
+      ${verwaist.length ? check("mitMieter", `Mieter ohne weitere Garage ebenfalls löschen (${verwaist.map((id) => mieterName(mieterById(id))).join(", ")})`, true) : ""}
+      ${laufend.length ? `<div class="warnbox">${check("sicher", `Ja, ich will auch ${laufend.length === 1 ? "den laufenden Vertrag" : `die ${laufend.length} laufenden Verträge`} löschen`, false)}<p class="hint" style="margin:4px 0 0">Wenn der Mieter nur ausgezogen ist, setz den Vertrag besser auf „beendet“ – dann bleibt er dokumentiert.</p></div>` : ""}
+      <p class="hint">Tipp: Unter Einstellungen vorher eine Komplett-Sicherung herunterladen. Online legt die App außerdem täglich ein Backup an.</p>`,
+      [{ label: "Abbrechen" }, { label: "Endgültig löschen", cls: "primary danger-btn", onClick: () => {
+        const f = formValues($("#modalBody"));
+        if (laufend.length && !f.sicher) { toast("Bitte bestätigen, dass laufende Verträge gelöscht werden sollen"); return false; }
+        // Dateien im Speicher entfernen (im Hintergrund)
+        garagen.forEach((g) => (g.dateien || []).forEach((d) => {
+          const k = dateiKey(g, d);
+          (mode === "server" ? fetch(`/api/files/${k}`, { method: "DELETE" }) : IDB.del(k)).catch(() => {});
+        }));
+        vs.forEach((v) => delete db.zahlungen[v.id]);
+        db.vertraege = db.vertraege.filter((v) => !vids.has(v.id));
+        db.garagen = db.garagen.filter((g) => !gids.has(g.id));
+        const weg = new Set(mieterIds.concat(f.mitMieter ? verwaist : []));
+        db.mieter = db.mieter.filter((m) => !weg.has(m.id));
+        if (f.mitStandort) {
+          db.standorte = db.standorte.filter((st) => !leer.includes(st.id));
+          if (leer.includes(garagenFilter.standort)) garagenFilter.standort = "";
+        }
+        if (onDone) onDone();
+        commit();
+        toast("Gelöscht");
+      } }]);
+  }
+
   /* ================= Garagen & Standorte ================= */
   let garagenFilter = { standort: "", q: "" };
   views.garagen = () => {
@@ -504,7 +609,12 @@
         return `${g.nummer} ${standortById(g.standortId).name} ${mieterName(m)} ${g.notiz || ""}`.toLowerCase().includes(garagenFilter.q.toLowerCase());
       })
       .sort(sortGaragen);
+    const unklar = db.standorte.filter((s) => !s.adresse || /adresse fehlt/i.test(s.adresse) || /^(eigentumsgarage|pachtgarage)/i.test(s.name));
     $("#view").innerHTML = `<h1>Garagen</h1><p class="sub">Standorte und einzelne Garagen bzw. Stellplätze verwalten</p>
+    ${unklar.length ? `<div class="panel warnpanel"><div class="panel-head"><h2>${unklar.length} Standort(e) ohne richtige Adresse</h2><span class="meta">Einfach umbenennen und Adresse eintragen – oder die Garage einem vorhandenen Standort zuordnen.</span></div>
+      ${unklar.map((s) => { const gs = db.garagen.filter((g) => g.standortId === s.id); return `<div class="fixrow"><div><b>${esc(s.name)}</b><div class="hint" style="margin:0">${gs.map((g) => { const v = laufenderVertrag(g.id); return `Garage ${esc(g.nummer)}${v ? " · " + esc(mieterName(mieterById(v.mieterId))) : ""}`; }).join(", ") || "keine Garagen"}</div></div>
+        <div class="actions"><button class="btn small primary" data-es="${s.id}">Name &amp; Adresse ändern</button>${gs.length === 1 ? ` <button class="btn small" data-eg="${gs[0].id}">Anderem Standort zuordnen</button>` : ""}</div></div>`; }).join("")}
+    </div>` : ""}
     <div class="panel"><div class="panel-head"><h2>Standorte</h2><div class="actions"><button class="btn primary small" id="addStandort">+ Standort</button></div></div>
       ${db.standorte.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Adresse</th><th class="num">Garagen</th><th></th></tr></thead><tbody>
       ${db.standorte.slice().sort((a, b) => a.name.localeCompare(b.name, "de")).map((s) => `<tr><td><b>${esc(s.name)}</b></td><td>${esc(s.adresse)}</td><td class="num">${db.garagen.filter((g) => g.standortId === s.id).length}</td>
@@ -530,8 +640,9 @@
     $$("[data-es]").forEach((b) => (b.onclick = () => standortForm(db.standorte.find((s) => s.id === b.dataset.es))));
     $$("[data-ds]").forEach((b) => (b.onclick = () => {
       const s = db.standorte.find((x) => x.id === b.dataset.ds);
-      if (db.garagen.some((g) => g.standortId === s.id)) return alertModal("Nicht möglich", "Diesem Standort sind noch Garagen zugeordnet. Bitte zuerst die Garagen löschen oder verschieben.");
-      confirmModal("Standort löschen?", `„${s.name}“ wird gelöscht.`, () => { db.standorte = db.standorte.filter((x) => x.id !== s.id); commit(); });
+      const gs = db.garagen.filter((g) => g.standortId === s.id);
+      if (!gs.length) return confirmModal("Standort löschen?", `„${s.name}“ wird gelöscht.`, () => { db.standorte = db.standorte.filter((x) => x.id !== s.id); commit(); });
+      loeschDialog({ titel: `Standort „${s.name}“ löschen?`, garagen: gs, hinweis: `Der Standort wird mit allen ${gs.length} Garagen gelöscht.`, onDone: () => { db.standorte = db.standorte.filter((x) => x.id !== s.id); if (garagenFilter.standort === s.id) garagenFilter.standort = ""; } });
     }));
     $("#fStandort").onchange = (e) => { garagenFilter.standort = e.target.value; rerender(); };
     $("#fQ").oninput = (e) => { garagenFilter.q = e.target.value; clearTimeout(views._q); views._q = setTimeout(() => { rerender(); const i = $("#fQ"); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }, 250); };
@@ -541,8 +652,7 @@
     $$("[data-eg]").forEach((b) => (b.onclick = () => garageForm(garageById(b.dataset.eg))));
     $$("[data-xg]").forEach((b) => (b.onclick = () => {
       const g = garageById(b.dataset.xg);
-      if (db.vertraege.some((v) => v.garageId === g.id)) return alertModal("Nicht möglich", "Für diese Garage gibt es Verträge (auch beendete). Sie bleibt zur Dokumentation erhalten.");
-      confirmModal("Garage löschen?", `Garage Nr. ${g.nummer} wird gelöscht.`, () => { db.garagen = db.garagen.filter((x) => x.id !== g.id); commit(); });
+      loeschDialog({ titel: `Garage ${g.nummer} (${standortById(g.standortId).name}) löschen?`, garagen: [g] });
     }));
   };
 
@@ -605,8 +715,8 @@
     $$("[data-em]").forEach((b) => (b.onclick = () => mieterForm(mieterById(b.dataset.em))));
     $$("[data-xm]").forEach((b) => (b.onclick = () => {
       const m = mieterById(b.dataset.xm);
-      if (db.vertraege.some((v) => v.mieterId === m.id)) return alertModal("Nicht möglich", "Für diesen Mieter gibt es Verträge. Er bleibt zur Dokumentation erhalten.");
-      confirmModal("Mieter löschen?", `${mieterName(m)} wird gelöscht.`, () => { db.mieter = db.mieter.filter((x) => x.id !== m.id); commit(); });
+      if (!db.vertraege.some((v) => v.mieterId === m.id)) return confirmModal("Mieter löschen?", `${mieterName(m)} wird gelöscht.`, () => { db.mieter = db.mieter.filter((x) => x.id !== m.id); commit(); });
+      loeschDialog({ titel: `${mieterName(m)} löschen?`, mieterIds: [m.id], hinweis: "Die Verträge dieses Mieters werden mitgelöscht, die Garagen bleiben erhalten und sind danach frei." });
     }));
   };
 
@@ -1400,7 +1510,11 @@
     const vOpts = [["", `Ich (${db.settings.name})`], ...(db.vermieter || []).map((x) => [x.id, x.name])];
     openModal(isNew ? "Neue Garage" : `Garage ${g.nummer} bearbeiten`, `
       <div class="grid">
-        ${select("standortId", "Standort", standortOptions(), g.standortId)}
+        <label class="f">Standort<select name="standortId">${standortOptions().map(([v, l]) => `<option value="${esc(v)}" ${v === g.standortId ? "selected" : ""}>${esc(l)}</option>`).join("")}<option value="__neu">+ Neuer Standort …</option></select><span class="hint" id="stAdr"></span></label>
+        <div class="full grid" id="neuSt" style="display:none">
+          ${field("neuName", "Name des neuen Standorts", "", { attrs: 'placeholder="z. B. Zeitz, Schützenplatz"' })}
+          ${field("neuAdresse", "Adresse", "", { attrs: 'placeholder="Straße, PLZ Ort"', hint: "Erscheint so im Mietvertrag." })}
+        </div>
         ${field("nummer", "Nummer", g.nummer)}
         ${select("typ", "Typ", [["Garage", "Garage"], ["Stellplatz", "Stellplatz"]], g.typ)}
         ${field("groesse", "Größe in m² (optional)", g.groesse, { type: "number", attrs: 'step="0.1"' })}
@@ -1432,9 +1546,18 @@
         ${field("sonstigeJahr", "Sonstige Kosten € / Jahr", g.sonstigeJahr, { type: "number", attrs: 'step="0.01"', hint: "Versicherung, Reparaturen …" })}
       </div><p class="hint" id="rendPrev"></p></fieldset>
       <div class="grid" style="margin-top:12px">${area("notiz", "Notiz (Zustand, Vormieter, offene Punkte …)", g.notiz, { rows: 3 })}</div>`,
-      [{ label: "Abbrechen" }, { label: "Speichern", cls: "primary", onClick: () => {
+      [...(isNew ? [] : [{ label: "Garage löschen", cls: "danger left", onClick: () => { loeschDialog({ titel: `Garage ${g.nummer} (${standortById(g.standortId).name}) löschen?`, garagen: [g] }); return false; } }]),
+       { label: "Abbrechen" }, { label: "Speichern", cls: "primary", onClick: () => {
         const f = formValues($("#modalBody"));
         if (!f.nummer) { toast("Bitte eine Nummer angeben (oder „o. Nr.“)"); return false; }
+        let neuerStandort = null;
+        if (f.standortId === "__neu") {
+          if (!f.neuName || !f.neuAdresse) { toast("Bitte Name und Adresse des neuen Standorts angeben"); return false; }
+          neuerStandort = { id: uid(), name: f.neuName, adresse: f.neuAdresse, notiz: "" };
+          f.standortId = neuerStandort.id;
+        }
+        delete f.neuName; delete f.neuAdresse;
+        const alterStandort = g.standortId;
         if (db.garagen.some((x) => x.id !== g.id && x.standortId === f.standortId && String(x.nummer) === f.nummer)) { toast("Diese Nummer gibt es an dem Standort schon"); return false; }
         if (f.geo) {
           const p = parseGeo(f.geo);
@@ -1442,11 +1565,27 @@
           f.lat = p[0]; f.lng = p[1];
         } else { f.lat = ""; f.lng = ""; }
         delete f.geo;
+        if (neuerStandort) db.standorte.push(neuerStandort);
         Object.assign(g, f);
         if (isNew) db.garagen.push(g);
-        commit(); toast("Garage gespeichert");
+        // alter Standort leer? -> automatisch entfernen
+        let hinweis = "";
+        if (!isNew && alterStandort && alterStandort !== g.standortId && !db.garagen.some((x) => x.standortId === alterStandort)) {
+          const alt = db.standorte.find((x) => x.id === alterStandort);
+          db.standorte = db.standorte.filter((x) => x.id !== alterStandort);
+          if (alt) hinweis = ` · leerer Standort „${alt.name}“ entfernt`;
+          if (garagenFilter.standort === alterStandort) garagenFilter.standort = "";
+        }
+        commit(); toast("Garage gespeichert" + hinweis);
       } }],
       (root) => {
+        const stSel = $("[name=standortId]", root);
+        const stUpd = () => {
+          $("#neuSt", root).style.display = stSel.value === "__neu" ? "" : "none";
+          $("#stAdr", root).textContent = stSel.value === "__neu" ? "" : standortById(stSel.value).adresse || "";
+          if (stSel.value === "__neu") $("[name=neuName]", root).focus();
+        };
+        stSel.onchange = stUpd; stUpd();
         const geo = $("[name=geo]", root);
         $("#geoGet", root).onclick = () => geoAufnehmen((lat, lng, acc) => {
           geo.value = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
@@ -1486,7 +1625,7 @@
     const kp = num(g.kaufpreis);
     const dateien = (g.dateien || []).slice().sort((a, b) => (b.datum || "").localeCompare(a.datum || ""));
     const urls = await Promise.all(dateien.map((f) => dateiUrl(g, f)));
-    let body = `<p><span class="badge ${stt}">${statusLabel[stt]}</span> &nbsp;${esc(s.name)}, ${esc(s.adresse)}</p>
+    let body = `<p><span class="badge ${stt}">${statusLabel[stt]}</span> &nbsp;${esc(s.name)}, ${esc(s.adresse)} <button type="button" class="linkbtn" id="stChange" style="text-decoration:underline">Standort ändern</button></p>
     <div class="toolbar" style="margin:0 0 10px">
       ${geo ? `<a class="btn primary" href="${navUrl(geo)}" target="_blank" rel="noopener">🧭 Navigation</a><a class="btn" href="${kartenUrl(geo)}" target="_blank" rel="noopener">Karte</a><button type="button" class="btn" id="geoCopy">Koordinaten kopieren</button>${geo.eigen ? "" : `<span class="hint">Koordinaten von Garage ${esc(geo.von.nummer)} am selben Standort</span>`}`
         : `<button type="button" class="btn" id="geoNow">📍 Standort jetzt aufnehmen</button><span class="hint">Noch keine Koordinaten hinterlegt.</span>`}
@@ -1527,6 +1666,7 @@
       actions.push({ label: "Vertrag anlegen", cls: "primary", onClick: () => { schnellVertrag({ garageId: g.id }); return false; } });
     }
     openModal(`${g.typ === "Stellplatz" ? "Stellplatz" : "Garage"} ${g.nummer} · ${s.name}`, body, actions, (root) => {
+      $("#stChange", root).onclick = () => garageForm(g);
       if ($("#geoCopy", root)) $("#geoCopy", root).onclick = () => { navigator.clipboard?.writeText(`${geo.lat}, ${geo.lng}`); toast("Koordinaten kopiert"); };
       if ($("#geoNow", root)) $("#geoNow", root).onclick = () => geoAufnehmen((lat, lng, acc) => { g.lat = lat; g.lng = lng; save(); toast(`Standort gespeichert (± ${Math.round(acc)} m)`); garageDetail(gid); });
       const upload = async (files) => {
