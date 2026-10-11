@@ -25,6 +25,7 @@
     vertraege: [],
     zahlungen: {},
     warteliste: [],
+    kosten: [],
     seq: 0,
   });
 
@@ -502,7 +503,7 @@
         </ul>
         <div class="mini">
           <div><span>Leerstand kostet</span><b>${eur0(leerVerlust)}/Monat</b></div>
-          <div><span>Warteliste</span><b>${db.warteliste.length}</b></div>
+          <div><span>Kosten ${new Date().getFullYear()} (Belege)</span><b>${eur0(kostenListe().filter((k) => k.datum.startsWith(String(new Date().getFullYear()))).reduce((s, k) => s + num(k.betrag), 0))}</b></div>
           <div><span>Offene Punkte in Notizen</span><b>${offenePunkte}</b></div>
         </div>
       </section>
@@ -1618,7 +1619,7 @@
     const m = v && mieterById(v.mieterId);
     const stt = garageStatus(g);
     const offen = v ? offeneMonate(v) : [];
-    const warte = db.warteliste.filter((w) => !w.standortId || w.standortId === g.standortId);
+    const gKosten = kostenListe().filter((k) => k.garageId === g.id).sort((a, b) => b.datum.localeCompare(a.datum));
     const geo = geoFuer(g);
     const kosten = kostenJahr(g);
     const ein = v ? gesamt(v) * 12 : 0;
@@ -1654,9 +1655,10 @@
         <span class="hint" id="upState"></span>
       </div>
     </fieldset>`;
-    if (!v && warte.length) {
-      body += `<fieldset><legend>Warteliste</legend>${warte.map((w) => `<div>${esc(w.name)}${w.telefon ? ` · ${esc(w.telefon)}` : ""} <span class="hint">seit ${dfmt(w.datum)}</span></div>`).join("")}</fieldset>`;
-    }
+    body += `<fieldset><legend>Kosten · ${eur(gKosten.reduce((s, k) => s + num(k.betrag), 0))} gesamt</legend>
+      ${gKosten.length ? `<table class="compact"><tbody>${gKosten.slice(0, 8).map((k) => `<tr data-kk="${k.id}" style="cursor:pointer"><td>${dfmt(k.datum)}</td><td>${esc(k.beschreibung || k.kategorie)}${k.beleg ? " 🧾" : ""}</td><td class="num"><b>${eur(k.betrag)}</b></td></tr>`).join("")}</tbody></table>${gKosten.length > 8 ? `<p class="hint">+ ${gKosten.length - 8} weitere unter „Kosten“</p>` : ""}` : '<p class="hint" style="margin:0">Noch keine Kosten für diese Garage.</p>'}
+      <div class="toolbar" style="margin:10px 0 0"><button type="button" class="btn" id="kAkte">📷 Beleg für diese Garage erfassen</button></div>
+    </fieldset>`;
     const actions = [{ label: "Garage bearbeiten", cls: "left", onClick: () => { garageForm(g); return false; } }];
     if (v) {
       actions.push({ label: "Vertrag als PDF", onClick: () => { vertragPdf(v.id); return false; } });
@@ -1667,6 +1669,8 @@
     }
     openModal(`${g.typ === "Stellplatz" ? "Stellplatz" : "Garage"} ${g.nummer} · ${s.name}`, body, actions, (root) => {
       $("#stChange", root).onclick = () => garageForm(g);
+      $("#kAkte", root).onclick = () => kostenForm(null, { garageId: g.id });
+      $$("[data-kk]", root).forEach((tr) => (tr.onclick = () => kostenForm(kostenListe().find((k) => k.id === tr.dataset.kk))));
       if ($("#geoCopy", root)) $("#geoCopy", root).onclick = () => { navigator.clipboard?.writeText(`${geo.lat}, ${geo.lng}`); toast("Koordinaten kopiert"); };
       if ($("#geoNow", root)) $("#geoNow", root).onclick = () => geoAufnehmen((lat, lng, acc) => { g.lat = lat; g.lng = lng; save(); toast(`Standort gespeichert (± ${Math.round(acc)} m)`); garageDetail(gid); });
       const upload = async (files) => {
@@ -1701,8 +1705,10 @@
       const v = laufenderVertrag(g.id);
       const ein = v ? gesamt(v) * 12 : 0;
       const kosten = kostenJahr(g);
+      const inst = belegeJahr(g.id);
       const kp = num(g.kaufpreis);
-      return { g, v, ein, kosten, ueb: ein - kosten, kp, r: kp > 0 ? (ein - kosten) / kp : null };
+      const ueb = ein - kosten - inst;
+      return { g, v, ein, kosten, inst, ueb, kp, r: kp > 0 ? ueb / kp : null };
     }).sort((a, b) => (b.r ?? -99) - (a.r ?? -99) || b.ueb - a.ueb);
     const sum = (k) => rows.reduce((s, x) => s + x[k], 0);
     const mitKp = rows.filter((x) => x.kp > 0);
@@ -1711,25 +1717,26 @@
     const leerVerlust = leer.reduce((s, x) => s + (num(x.g.miete) + num(x.g.nebenkosten)) * 12, 0);
     const ohneKosten = rows.filter((x) => !hatKosten(x.g)).length;
     const filterBtns = [["eigen", "Meine Garagen"], ...(db.vermieter || []).map((x) => [x.id, x.name]), ["alle", "Alle"]];
-    $("#view").innerHTML = `<h1>Rendite</h1><p class="sub">Einnahmen aus laufenden Verträgen abzüglich Pacht, Grundsteuer, Beiträge und Hausgeld, pro Jahr</p>
+    $("#view").innerHTML = `<h1>Rendite</h1><p class="sub">Einnahmen aus laufenden Verträgen abzüglich fester Kosten (Pacht, Grundsteuer, Beiträge, Hausgeld) und erfasster Belege der letzten 12 Monate</p>
     <div class="toolbar">${filterBtns.map(([k, l]) => `<button class="btn small ${renditeFilter === k ? "primary" : ""}" data-rf="${esc(k)}">${esc(l)}</button>`).join("")}</div>
     <div class="cards">
       <div class="card"><div class="lbl">Einnahmen / Jahr</div><div class="val">${eur(sum("ein"))}</div></div>
-      <div class="card"><div class="lbl">Kosten / Jahr</div><div class="val">${eur(sum("kosten"))}</div>${ohneKosten ? `<div class="lbl">${ohneKosten} Garagen ohne Kosten</div>` : ""}</div>
+      <div class="card"><div class="lbl">Kosten / Jahr</div><div class="val">${eur(sum("kosten") + sum("inst"))}</div><div class="lbl">davon Belege ${eur(sum("inst"))}</div>${ohneKosten ? `<div class="lbl">${ohneKosten} Garagen ohne Kosten</div>` : ""}</div>
       <div class="card"><div class="lbl">Überschuss / Jahr</div><div class="val">${eur(sum("ueb"))}</div><div class="lbl">${eur(sum("ueb") / 12)} pro Monat</div></div>
       <div class="card"><div class="lbl">Rendite</div><div class="val">${gesamtR === null ? "–" : fmtPct(gesamtR)}</div><div class="lbl">${mitKp.length} von ${rows.length} mit Kaufpreis</div></div>
       <div class="card"><div class="lbl">Leerstand kostet</div><div class="val" style="color:${leerVerlust ? "var(--danger)" : "inherit"}">${eur(leerVerlust)}</div><div class="lbl">${leer.length} frei, pro Jahr</div></div>
     </div>
-    <div class="panel table-wrap">${rows.length ? `<table><thead><tr><th>Garage</th><th>Mieter</th><th class="num">Einnahmen</th><th class="num">Kosten</th><th class="num">Überschuss</th><th class="num">Kaufpreis</th><th class="num">Rendite</th></tr></thead><tbody>
+    <div class="panel table-wrap">${rows.length ? `<table><thead><tr><th>Garage</th><th>Mieter</th><th class="num">Einnahmen</th><th class="num">Feste Kosten</th><th class="num">Belege 12 M.</th><th class="num">Überschuss</th><th class="num">Kaufpreis</th><th class="num">Rendite</th></tr></thead><tbody>
     ${rows.map((x) => { const st = standortById(x.g.standortId); const m = x.v && mieterById(x.v.mieterId); return `<tr data-rg="${x.g.id}" style="cursor:pointer">
       <td>${esc(st.name)} · <b>${esc(x.g.nummer)}</b>${istEigen(x.g) ? "" : `<div class="hint" style="margin:0">${esc(vermieterName(x.g))}</div>`}</td>
       <td>${m ? esc(mieterName(m)) : '<span class="badge frei">frei</span>'}</td>
       <td class="num">${eur(x.ein)}</td>
       <td class="num">${hatKosten(x.g) ? eur(x.kosten) : '<span class="hint">fehlt</span>'}</td>
+      <td class="num">${x.inst ? eur(x.inst) : '<span class="hint">–</span>'}</td>
       <td class="num" style="color:${x.ueb < 0 ? "var(--danger)" : "inherit"}">${eur(x.ueb)}</td>
       <td class="num">${x.kp ? eur(x.kp) : '<span class="hint">–</span>'}</td>
       <td class="num"><b>${x.r === null ? "–" : fmtPct(x.r)}</b></td></tr>`; }).join("")}
-    <tr><td colspan="2"><b>Summe</b></td><td class="num"><b>${eur(sum("ein"))}</b></td><td class="num"><b>${eur(sum("kosten"))}</b></td><td class="num"><b>${eur(sum("ueb"))}</b></td><td class="num"><b>${eur(sum("kp"))}</b></td><td class="num"><b>${gesamtR === null ? "–" : fmtPct(gesamtR)}</b></td></tr>
+    <tr><td colspan="2"><b>Summe</b></td><td class="num"><b>${eur(sum("ein"))}</b></td><td class="num"><b>${eur(sum("kosten"))}</b></td><td class="num"><b>${eur(sum("inst"))}</b></td><td class="num"><b>${eur(sum("ueb"))}</b></td><td class="num"><b>${eur(sum("kp"))}</b></td><td class="num"><b>${gesamtR === null ? "–" : fmtPct(gesamtR)}</b></td></tr>
     </tbody></table>` : '<p class="empty">Keine Garagen in dieser Auswahl.</p>'}</div>
     <p class="hint">Zeile anklicken, um Kosten und Kaufpreis einzutragen. Die Rendite bezieht sich auf den Kaufpreis.</p>`;
     $$("[data-rf]").forEach((b) => (b.onclick = () => { renditeFilter = b.dataset.rf; rerender(); }));
@@ -1757,7 +1764,165 @@
       } }]);
   }
 
-  /* ================= Warteliste ================= */
+  /* ================= Kosten & Belege ================= */
+  const KATEGORIEN = ["Instandhaltung", "Reparatur", "Material", "Reinigung / Winterdienst", "Versicherung", "Steuern / Abgaben", "Pacht / Beiträge", "Sonstiges"];
+  const belegKey = (k) => `${k.beleg.garageKey || k.garageId || "allgemein"}/${k.beleg.id}`;
+  const belegCache = {};
+  async function belegUrl(k) {
+    if (!k.beleg) return "";
+    const key = belegKey(k);
+    if (mode === "server") return `/api/files/${key}`;
+    if (!(key in belegCache)) { const b = await IDB.get(key).catch(() => null); belegCache[key] = b ? URL.createObjectURL(b) : ""; }
+    return belegCache[key];
+  }
+  async function belegHochladen(k, blob, name) {
+    const beleg = { id: uid(), name, typ: blob.type || "application/octet-stream", groesse: blob.size };
+    if (blob.size > 5.5 * 1024 * 1024) throw new Error("Beleg zu groß (max. 5 MB)");
+    const key = `${k.garageId || "allgemein"}/${beleg.id}`;
+    if (mode === "server") {
+      const r = await fetch(`/api/files/${key}`, { method: "PUT", headers: { "Content-Type": beleg.typ }, body: blob });
+      if (!r.ok) throw new Error(`Upload fehlgeschlagen (${r.status})`);
+    } else await IDB.put(key, blob);
+    return beleg;
+  }
+  function belegLoeschen(k) {
+    if (!k.beleg) return;
+    const key = belegKey(k);
+    (mode === "server" ? fetch(`/api/files/${key}`, { method: "DELETE" }) : IDB.del(key)).catch(() => {});
+  }
+  const garageLabel = (gid) => { const g = garageById(gid); if (!g) return gid ? "(gelöschte Garage)" : "Allgemein"; return `${standortById(g.standortId).name} · ${g.nummer}`; };
+  const kostenListe = () => (db.kosten = db.kosten || []);
+  // Instandhaltung & Co. der letzten 12 Monate je Garage (für die Rendite)
+  function belegeJahr(gid) {
+    const ab = addDays(today(), -365);
+    return kostenListe().filter((k) => k.garageId === gid && k.datum >= ab).reduce((s, k) => s + num(k.betrag), 0);
+  }
+  let letzteGarage = "";
+
+  function kostenForm(k, preset = {}) {
+    const isNew = !k;
+    k = k || { id: uid(), datum: today(), garageId: preset.garageId ?? letzteGarage, kategorie: "Instandhaltung", betrag: "", beschreibung: "", beleg: null };
+    let neueDatei = null;
+    const opts = db.standorte.slice().sort((a, b) => a.name.localeCompare(b.name, "de")).map((s) => {
+      const gs = db.garagen.filter((g) => g.standortId === s.id).sort(sortGaragen);
+      return gs.length ? `<optgroup label="${esc(s.name)}">${gs.map((g) => { const v = laufenderVertrag(g.id); return `<option value="${g.id}" ${g.id === k.garageId ? "selected" : ""}>${esc(s.name)} · ${esc(g.nummer)}${v ? " – " + esc(mieterById(v.mieterId)?.nachname || "") : ""}</option>`; }).join("")}</optgroup>` : "";
+    }).join("");
+    openModal(isNew ? "Kosten erfassen" : "Kosten bearbeiten", `
+      <div class="beleg-box" id="belegBox">
+        <div class="beleg-prev" id="belegPrev"><span class="hint">Noch kein Beleg</span></div>
+        <div class="toolbar" style="margin:0;justify-content:center">
+          <label class="btn primary">📷 Beleg fotografieren<input type="file" id="kCam" accept="image/*" capture="environment" hidden></label>
+          <label class="btn">📎 Datei / PDF<input type="file" id="kFile" accept="image/*,application/pdf" hidden></label>
+        </div>
+      </div>
+      <div class="grid" style="margin-top:12px">
+        <label class="f full">Garage<select name="garageId"><option value="" ${!k.garageId ? "selected" : ""}>Allgemein (keiner Garage zugeordnet)</option>${opts}</select></label>
+        ${field("betrag", "Betrag € (brutto)", k.betrag, { type: "number", attrs: 'step="0.01" inputmode="decimal" placeholder="0,00"' })}
+        ${field("datum", "Datum", k.datum, { type: "date" })}
+        ${select("kategorie", "Kategorie", KATEGORIEN.map((x) => [x, x]), k.kategorie)}
+        ${field("beschreibung", "Was wurde gemacht / gekauft?", k.beschreibung, { attrs: 'placeholder="z. B. Torschloss getauscht"' })}
+      </div>`,
+      [...(isNew ? [] : [{ label: "Löschen", cls: "danger left", onClick: () => {
+          confirmModal("Kosten löschen?", `${k.beschreibung || k.kategorie} (${eur(k.betrag)}) und der Beleg werden gelöscht.`, () => {
+            belegLoeschen(k); db.kosten = kostenListe().filter((x) => x.id !== k.id); commit();
+          });
+          return false;
+        } }]),
+       { label: "Abbrechen" },
+       { label: isNew ? "Speichern" : "Änderungen speichern", cls: "primary", onClick: async () => {
+          const f = formValues($("#modalBody"));
+          if (!(num(f.betrag) > 0)) { toast("Bitte einen Betrag eingeben"); return false; }
+          if (!f.datum) { toast("Bitte ein Datum angeben"); return false; }
+          const btn = $$("#modalActions .btn.primary").pop();
+          const alteGarage = k.garageId;
+          Object.assign(k, { garageId: f.garageId, betrag: f.betrag, datum: f.datum, kategorie: f.kategorie, beschreibung: f.beschreibung });
+          try {
+            if (neueDatei) {
+              btn.disabled = true; btn.textContent = "Lade Beleg hoch …";
+              const alt = k.beleg ? { ...k, garageId: alteGarage } : null;
+              k.beleg = await belegHochladen(k, neueDatei.blob, neueDatei.name);
+              if (alt) belegLoeschen(alt);
+            } else if (k.beleg && alteGarage !== k.garageId) {
+              // Beleg bleibt unter alter Garage gespeichert – Schlüssel merken
+              k.beleg.garageKey = k.beleg.garageKey || alteGarage || "allgemein";
+            }
+          } catch (e) { btn.disabled = false; btn.textContent = "Speichern"; toast(e.message); return false; }
+          letzteGarage = k.garageId;
+          if (isNew) kostenListe().push(k);
+          commit();
+          toast(`Kosten ${eur(k.betrag)} gespeichert`);
+        } }],
+      async (root) => {
+        const prev = $("#belegPrev", root);
+        const zeige = (url, typ) => {
+          prev.innerHTML = !url ? '<span class="hint">Noch kein Beleg</span>' : /^image\//.test(typ) ? `<img src="${esc(url)}" alt="Beleg">` : `<a href="${esc(url)}" target="_blank" rel="noopener" class="ficon">PDF öffnen</a>`;
+        };
+        if (k.beleg) zeige(await belegUrl(k), k.beleg.typ);
+        const nimm = async (file) => {
+          if (!file) return;
+          const blob = await bildVerkleinern(file);
+          neueDatei = { blob, name: blob !== file ? `Beleg ${today()}.jpg` : file.name };
+          zeige(URL.createObjectURL(blob), blob.type);
+          $("[name=betrag]", root).focus();
+        };
+        $("#kCam", root).onchange = (e) => nimm(e.target.files[0]);
+        $("#kFile", root).onchange = (e) => nimm(e.target.files[0]);
+      });
+  }
+
+  let kostenFilter = { jahr: String(new Date().getFullYear()), kat: "", standort: "" };
+  views.kosten = async () => {
+    const alle = kostenListe();
+    const jahre = [...new Set(alle.map((k) => k.datum.slice(0, 4)).concat([String(new Date().getFullYear())]))].sort().reverse();
+    const list = alle.filter((k) => (!kostenFilter.jahr || k.datum.startsWith(kostenFilter.jahr)) && (!kostenFilter.kat || k.kategorie === kostenFilter.kat)
+      && (!kostenFilter.standort || (kostenFilter.standort === "allgemein" ? !garageById(k.garageId) : garageById(k.garageId)?.standortId === kostenFilter.standort)))
+      .sort((a, b) => b.datum.localeCompare(a.datum));
+    const summe = list.reduce((s, k) => s + num(k.betrag), 0);
+    const ohneBeleg = list.filter((k) => !k.beleg).length;
+    const proKat = KATEGORIEN.map((kat) => ({ label: kat, wert: list.filter((k) => k.kategorie === kat).reduce((s, k) => s + num(k.betrag), 0) })).filter((r) => r.wert > 0)
+      .sort((a, b) => b.wert - a.wert).map((r) => ({ ...r, tip: `${eur(r.wert)}` }));
+    const proGarage = {};
+    list.forEach((k) => { proGarage[k.garageId || ""] = (proGarage[k.garageId || ""] || 0) + num(k.betrag); });
+    const topGaragen = Object.entries(proGarage).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([gid, w]) => ({ label: garageLabel(gid), wert: w, tip: eur(w) }));
+    const urls = await Promise.all(list.map((k) => belegUrl(k)));
+    $("#view").innerHTML = `
+    <div class="dash-head"><div><h1>Kosten</h1><p class="sub">Instandhaltung, Reparaturen und andere Ausgaben – mit Beleg pro Garage</p></div>
+      <div class="toolbar" style="margin:0"><button class="btn" id="kCsv">Export (CSV)</button><button class="btn primary" id="kNeu">📷 Beleg erfassen</button></div></div>
+    <div class="toolbar">
+      <select id="kJahr" style="max-width:120px"><option value="">Alle Jahre</option>${jahre.map((j) => `<option ${j === kostenFilter.jahr ? "selected" : ""}>${j}</option>`).join("")}</select>
+      <select id="kKat" style="max-width:220px"><option value="">Alle Kategorien</option>${KATEGORIEN.map((x) => `<option ${x === kostenFilter.kat ? "selected" : ""}>${esc(x)}</option>`).join("")}</select>
+      <select id="kSt" style="max-width:260px"><option value="">Alle Standorte</option><option value="allgemein" ${kostenFilter.standort === "allgemein" ? "selected" : ""}>Allgemein</option>${db.standorte.slice().sort((a, b) => a.name.localeCompare(b.name, "de")).map((s) => `<option value="${s.id}" ${s.id === kostenFilter.standort ? "selected" : ""}>${esc(s.name)}</option>`).join("")}</select>
+    </div>
+    <div class="cards">
+      <div class="card"><div class="lbl">Summe ${esc(kostenFilter.jahr || "gesamt")}</div><div class="val">${eur(summe)}</div></div>
+      <div class="card"><div class="lbl">Belege</div><div class="val">${list.length}</div>${ohneBeleg ? `<div class="lbl">${ohneBeleg} ohne Foto</div>` : ""}</div>
+      <div class="card"><div class="lbl">Pro Monat (Ø)</div><div class="val">${eur(kostenFilter.jahr ? summe / (kostenFilter.jahr === String(new Date().getFullYear()) ? new Date().getMonth() + 1 : 12) : 0)}</div></div>
+    </div>
+    ${list.length ? `<div class="dash" style="margin-bottom:14px">
+      <section class="card span-6"><div class="card-head"><h2>Nach Kategorie</h2></div>${hbalken(proKat)}</section>
+      <section class="card span-6"><div class="card-head"><h2>Teuerste Garagen</h2></div>${hbalken(topGaragen)}</section>
+    </div>` : ""}
+    <div class="panel table-wrap">${list.length ? `<table><thead><tr><th>Beleg</th><th>Datum</th><th>Garage</th><th>Kategorie</th><th>Beschreibung</th><th class="num">Betrag</th></tr></thead><tbody>
+      ${list.map((k, i) => `<tr data-k="${k.id}" style="cursor:pointer">
+        <td>${k.beleg ? (/^image\//.test(k.beleg.typ) && urls[i] ? `<a href="${esc(urls[i])}" target="_blank" rel="noopener" class="kthumb" data-stop="1"><img src="${esc(urls[i])}" alt="" loading="lazy"></a>` : `<a href="${esc(urls[i])}" target="_blank" rel="noopener" class="kthumb pdf" data-stop="1">PDF</a>`) : '<span class="kthumb leer">–</span>'}</td>
+        <td>${dfmt(k.datum)}</td><td>${esc(garageLabel(k.garageId))}</td><td>${esc(k.kategorie)}</td><td>${esc(k.beschreibung || "")}</td><td class="num"><b>${eur(k.betrag)}</b></td></tr>`).join("")}
+      <tr><td colspan="5"><b>Summe</b></td><td class="num"><b>${eur(summe)}</b></td></tr></tbody></table>`
+      : `<div class="empty">Noch keine Kosten${kostenFilter.jahr ? ` in ${esc(kostenFilter.jahr)}` : ""}.<br><br><button class="btn primary" id="kNeu2">📷 Ersten Beleg erfassen</button></div>`}</div>`;
+    const neu = () => kostenForm(null);
+    $("#kNeu").onclick = neu;
+    if ($("#kNeu2")) $("#kNeu2").onclick = neu;
+    $("#kJahr").onchange = (e) => { kostenFilter.jahr = e.target.value; rerender(); };
+    $("#kKat").onchange = (e) => { kostenFilter.kat = e.target.value; rerender(); };
+    $("#kSt").onchange = (e) => { kostenFilter.standort = e.target.value; rerender(); };
+    $$("tr[data-k]").forEach((tr) => (tr.onclick = (e) => { if (e.target.closest("[data-stop]")) return; kostenForm(kostenListe().find((k) => k.id === tr.dataset.k)); }));
+    $("#kCsv").onclick = () => {
+      const rows = [["Datum", "Standort", "Garage", "Kategorie", "Beschreibung", "Betrag", "Beleg"]];
+      list.slice().reverse().forEach((k) => { const g = garageById(k.garageId); rows.push([dfmt(k.datum), g ? standortById(g.standortId).name : "Allgemein", g ? g.nummer : "", k.kategorie, k.beschreibung || "", String(num(k.betrag).toFixed(2)).replace(".", ","), k.beleg ? "ja" : "nein"]); });
+      downloadText("﻿" + rows.map((r) => r.map((x) => `"${String(x).replace(/"/g, '""')}"`).join(";")).join("\r\n"), `kosten-${kostenFilter.jahr || "alle"}.csv`, "text/csv;charset=utf-8");
+    };
+  };
+
+  /* ================= Warteliste (ausgeblendet) ================= */
   views.warteliste = () => {
     const list = db.warteliste.slice().sort((a, b) => (a.datum || "").localeCompare(b.datum || ""));
     $("#view").innerHTML = `<h1>Warteliste</h1><p class="sub">Interessenten für frei werdende Garagen</p>
@@ -1848,7 +2013,7 @@
       if (!file) return;
       try {
         const data = JSON.parse(await file.text());
-        const arten = ["vermieter", "standorte", "garagen", "mieter", "vertraege", "warteliste"];
+        const arten = ["vermieter", "standorte", "garagen", "mieter", "vertraege", "warteliste", "kosten"];
         const neu = {};
         arten.forEach((k) => { const ids = new Set((db[k] || []).map((x) => x.id)); neu[k] = (data[k] || []).filter((x) => !ids.has(x.id)); });
         const n = arten.reduce((s, k) => s + neu[k].length, 0);
@@ -1883,6 +2048,7 @@
     await load();
     let start = "uebersicht";
     try { start = localStorage.getItem("gv-tab") || start; } catch (_) { /* */ }
+    if (start === "warteliste") start = "kosten";
     show(views[start] ? start : "uebersicht");
   })();
 
