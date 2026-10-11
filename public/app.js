@@ -415,6 +415,106 @@
     return `<div class="meter ${art}"><div style="width:${Math.max(0, Math.min(100, anteil * 100))}%"></div></div>`;
   }
 
+  /* ================= Karte der Standorte ================= */
+  // Pro Standort ein Punkt. Genaue Koordinaten (falls an einer Garage hinterlegt) haben Vorrang,
+  // sonst wird der Ort (PLZ + Ort aus der Adresse bzw. erstes Wort der Bezeichnung) einmalig über
+  // OpenStreetMap/Nominatim gesucht und im Browser zwischengespeichert.
+  let karte = null;
+  const GEO_CACHE_KEY = "gv_ortskoordinaten";
+  const geoCache = () => { try { return JSON.parse(localStorage.getItem(GEO_CACHE_KEY) || "{}"); } catch (e) { return {}; } };
+  const geoCacheSpeichern = (c) => { try { localStorage.setItem(GEO_CACHE_KEY, JSON.stringify(c)); } catch (e) { /* voll/gesperrt: egal */ } };
+
+  function ortsSuche(st) {
+    const adr = String(st.adresse || "");
+    let m = adr.match(/\b(\d{5})\s+([^,\d][^,]*)/);
+    if (m) return `${m[1]} ${m[2].trim()}`;
+    // Ohne PLZ: letztes Komma-Stück der Adresse, sonst erstes Wort der Bezeichnung (z. B. "Hof", "Gera Zusener Str.")
+    const teile = adr.split(",").map((x) => x.trim()).filter(Boolean);
+    if (teile.length > 1) return teile[teile.length - 1];
+    return String(st.name || "").trim().split(/[\s,\-–·]+/)[0] || "";
+  }
+
+  async function ortSuchen(q) {
+    const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=de&accept-language=de&q=${encodeURIComponent(q)}`);
+    if (!r.ok) throw new Error("Nominatim " + r.status);
+    const j = await r.json();
+    return j[0] ? { lat: +j[0].lat, lng: +j[0].lon } : null;
+  }
+
+  async function zeigeKarte() {
+    const el = $("#karte");
+    if (!el) return;
+    if (karte) { try { karte.remove(); } catch (e) { /* schon weg */ } karte = null; }
+    if (!window.L) { el.innerHTML = '<p class="hint" style="padding:12px">Kartenbibliothek konnte nicht geladen werden.</p>'; return; }
+    karte = L.map(el, { scrollWheelZoom: false }).setView([51.0, 10.5], 6);
+    const meine = karte;
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 18, attribution: "© OpenStreetMap-Mitwirkende" }).addTo(karte);
+    setTimeout(() => meine.invalidateSize(), 50);
+
+    const meta = $("#karteMeta");
+    const cache = geoCache();
+    const eintraege = []; // { st, lat, lng }
+    const offen = [];
+    db.standorte.forEach((st) => {
+      const exakt = db.garagen.filter((g) => g.standortId === st.id && g.lat && g.lng);
+      if (exakt.length) {
+        eintraege.push({ st, lat: exakt.reduce((a, g) => a + +g.lat, 0) / exakt.length, lng: exakt.reduce((a, g) => a + +g.lng, 0) / exakt.length });
+        return;
+      }
+      const q = ortsSuche(st);
+      if (!q) return;
+      if (cache[q]) { eintraege.push({ st, lat: cache[q].lat, lng: cache[q].lng }); return; }
+      offen.push({ st, q });
+    });
+
+    const zeichnen = () => {
+      if (karte !== meine) return; // Seite wurde inzwischen neu aufgebaut
+      meine.eachLayer((l) => { if (l instanceof L.Marker) meine.removeLayer(l); });
+      // Standorte am selben Ort (gleiche Koordinaten) zu einem Punkt zusammenfassen
+      const gruppen = new Map();
+      eintraege.forEach((e) => {
+        const k = e.lat.toFixed(2) + "," + e.lng.toFixed(2);
+        if (!gruppen.has(k)) gruppen.set(k, { lat: e.lat, lng: e.lng, sts: [] });
+        gruppen.get(k).sts.push(e.st);
+      });
+      const punkte = [];
+      gruppen.forEach((gr) => {
+        let n = 0, frei = 0, belegt = 0;
+        const zeilen = gr.sts.map((st) => {
+          const gs = db.garagen.filter((g) => g.standortId === st.id);
+          const f = gs.filter((g) => garageStatus(g) === "frei").length;
+          n += gs.length; frei += f; belegt += gs.length - f;
+          return `<div class="row"><b>${esc(st.name)}</b><br>${esc(st.adresse || "")}<br>${gs.length} Garagen · ${gs.length - f} belegt · ${f} frei<br><button class="btn small" data-karte-st="${st.id}">Garagen anzeigen</button></div>`;
+        }).join("");
+        const art = frei === 0 ? "vermietet" : belegt === 0 ? "frei" : "teil";
+        const icon = L.divIcon({ className: "", html: `<div class="kmarker ${art}">${n}</div>`, iconSize: [32, 32], iconAnchor: [16, 16], popupAnchor: [0, -14] });
+        const mk = L.marker([gr.lat, gr.lng], { icon }).addTo(meine).bindPopup(`<div class="kpop">${zeilen}</div>`);
+        mk.on("popupopen", (ev) => {
+          ev.popup.getElement().querySelectorAll("[data-karte-st]").forEach((b) => (b.onclick = () => { garagenFilter.standort = b.dataset.karteSt; show("garagen"); }));
+        });
+        punkte.push([gr.lat, gr.lng]);
+      });
+      if (punkte.length === 1) meine.setView(punkte[0], 11);
+      else if (punkte.length > 1) meine.fitBounds(punkte, { padding: [40, 40], maxZoom: 11 });
+      meta.textContent = `${gruppen.size} Orte · ${db.standorte.length} Standorte · grün = alles vermietet, orange = teils frei, rot = nur frei`;
+    };
+
+    zeichnen();
+    // Fehlende Orte nacheinander nachschlagen (Nominatim erlaubt max. 1 Anfrage pro Sekunde)
+    const nichtGefunden = [];
+    for (let i = 0; i < offen.length; i++) {
+      if (karte !== meine) return;
+      meta.textContent = `Orte werden gesucht (${i + 1}/${offen.length})...`;
+      try {
+        const p = await ortSuchen(offen[i].q);
+        if (p) { cache[offen[i].q] = p; eintraege.push({ st: offen[i].st, ...p }); geoCacheSpeichern(cache); zeichnen(); }
+        else nichtGefunden.push(offen[i].st.name);
+      } catch (e) { nichtGefunden.push(offen[i].st.name); }
+      if (i < offen.length - 1) await new Promise((r) => setTimeout(r, 1100));
+    }
+    if (nichtGefunden.length && karte === meine) meta.textContent += ` · nicht gefunden: ${nichtGefunden.join(", ")}`;
+  }
+
   views.uebersicht = () => {
     const gs = db.garagen;
     if (!gs.length) {
@@ -508,6 +608,11 @@
         </div>
       </section>
 
+      <section class="card span-12">
+        <div class="card-head"><h2>Karte der Standorte</h2><span class="meta" id="karteMeta"></span></div>
+        <div id="karte"></div>
+      </section>
+
       <section class="card span-6">
         <div class="card-head"><h2>Einnahmen je Standort</h2><span class="meta">pro Monat</span></div>
         ${standortRows.length ? hbalken(standortRows) : '<p class="hint">Noch keine laufenden Verträge.</p>'}
@@ -522,6 +627,7 @@
     </div>`;
     $("#quickV").onclick = () => schnellVertrag();
     $("#dImport").onclick = () => show("zahlungen");
+    zeigeKarte();
     if ($("#toPay")) $("#toPay").onclick = () => show("zahlungen");
     $$("[data-end]").forEach((b) => (b.onclick = () => vertragBeenden(b.dataset.end)));
     $$("tr[data-brief]").forEach((tr) => (tr.onclick = () => briefForm(tr.dataset.brief)));

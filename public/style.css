@@ -246,3 +246,11 @@ table.compact tr[data-brief]:hover { background: #f6f4f0; }
 .kthumb { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 6px; overflow: hidden; background: #f1eee8; border: 1px solid var(--line); text-decoration: none; font-size: 11px; font-weight: 700; color: var(--danger); }
 .kthumb img { width: 100%; height: 100%; object-fit: cover; }
 .kthumb.leer { color: var(--muted); font-weight: 400; }
+
+/* Karte der Standorte (Übersicht) */
+.span-12 { grid-column: span 12; }
+@media (max-width: 980px) { .span-12 { grid-column: span 12; } }
+#karte { height: 380px; border-radius: 10px; border: 1px solid var(--line); z-index: 0; }
+.kmarker { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; color: #fff; font-weight: 700; font-size: 13px; border: 3px solid #fff; box-shadow: 0 1px 6px rgba(0,0,0,.45); }
+.kmarker.vermietet { background: #2f7d4a; } .kmarker.teil { background: #e8a33d; color: #4a2f05; } .kmarker.frei { background: #b33a3a; }
+.kpop b { color: var(--ink-strong); } .kpop .row { margin: 4px 0 8px; } .kpop button { margin-top: 2px; }
