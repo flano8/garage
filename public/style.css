@@ -316,3 +316,5 @@ details.panel summary { cursor: pointer; }
 .kmarker { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; color: #fff; font-weight: 700; font-size: 13px; border: 3px solid #fff; box-shadow: 0 1px 6px rgba(0,0,0,.45); }
 .kmarker.vermietet { background: #2f7d4a; } .kmarker.teil { background: #e8a33d; color: #4a2f05; } .kmarker.frei { background: #b33a3a; }
 .kpop b { color: var(--ink-strong); } .kpop .row { margin: 4px 0 8px; } .kpop button { margin-top: 2px; }
+.minikarte { height: 240px; border-radius: 10px; border: 1px solid var(--line); margin-top: 10px; z-index: 0; }
+.leaflet-container { font: inherit; }

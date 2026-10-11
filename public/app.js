@@ -434,7 +434,13 @@
   const geoCache = () => { try { return JSON.parse(localStorage.getItem(GEO_CACHE_KEY) || "{}"); } catch (e) { return {}; } };
   const geoCacheSpeichern = (c) => { try { localStorage.setItem(GEO_CACHE_KEY, JSON.stringify(c)); } catch (e) { /* voll/gesperrt: egal */ } };
 
+  // Suchbegriff mit Straße (genau). Fällt die Suche leer aus, wird nur PLZ + Ort versucht (ortsSucheGrob).
   function ortsSuche(st) {
+    const adr = String(st.adresse || "").trim();
+    if (adr && !/adresse fehlt/i.test(adr) && /\b\d{5}\b/.test(adr) && /[a-zäöüß]{3,}/i.test(adr.split(/\b\d{5}\b/)[0])) return adr;
+    return ortsSucheGrob(st);
+  }
+  function ortsSucheGrob(st) {
     const adr = String(st.adresse || "");
     let m = adr.match(/\b(\d{5})\s+([^,\d][^,]*)/);
     if (m) return `${m[1]} ${m[2].trim()}`;
@@ -471,6 +477,7 @@
         eintraege.push({ st, lat: exakt.reduce((a, g) => a + +g.lat, 0) / exakt.length, lng: exakt.reduce((a, g) => a + +g.lng, 0) / exakt.length });
         return;
       }
+      if (st.lat && st.lng) { eintraege.push({ st, lat: +st.lat, lng: +st.lng }); return; }
       const q = ortsSuche(st);
       if (!q) return;
       if (cache[q]) { eintraege.push({ st, lat: cache[q].lat, lng: cache[q].lng }); return; }
@@ -483,7 +490,7 @@
       // Standorte am selben Ort (gleiche Koordinaten) zu einem Punkt zusammenfassen
       const gruppen = new Map();
       eintraege.forEach((e) => {
-        const k = e.lat.toFixed(2) + "," + e.lng.toFixed(2);
+        const k = e.lat.toFixed(3) + "," + e.lng.toFixed(3);
         if (!gruppen.has(k)) gruppen.set(k, { lat: e.lat, lng: e.lng, sts: [] });
         gruppen.get(k).sts.push(e.st);
       });
@@ -506,7 +513,7 @@
       });
       if (punkte.length === 1) meine.setView(punkte[0], 11);
       else if (punkte.length > 1) meine.fitBounds(punkte, { padding: [40, 40], maxZoom: 11 });
-      meta.textContent = `${gruppen.size} Orte · ${db.standorte.length} Standorte · grün = alles vermietet, orange = teils frei, rot = nur frei`;
+      meta.textContent = `${gruppen.size} Punkte · ${db.standorte.length} Standorte · grün = alles vermietet, orange = teils frei, rot = nur frei · ungenau? Im Standort den Punkt verschieben`;
     };
 
     zeichnen();
@@ -516,7 +523,9 @@
       if (karte !== meine) return;
       meta.textContent = `Orte werden gesucht (${i + 1}/${offen.length})...`;
       try {
-        const p = await ortSuchen(offen[i].q);
+        let p = await ortSuchen(offen[i].q);
+        const grob = ortsSucheGrob(offen[i].st);
+        if (!p && grob && grob !== offen[i].q) { await new Promise((r) => setTimeout(r, 1100)); p = await ortSuchen(grob); }
         if (p) { cache[offen[i].q] = p; eintraege.push({ st: offen[i].st, ...p }); geoCacheSpeichern(cache); zeichnen(); }
         else nichtGefunden.push(offen[i].st.name);
       } catch (e) { nichtGefunden.push(offen[i].st.name); }
@@ -811,17 +820,54 @@
   function standortForm(s) {
     const isNew = !s;
     s = s || { id: uid(), name: "", adresse: "", notiz: "" };
+    // vorhandene Adresse in Straße / PLZ / Ort zerlegen
+    let strasse = s.strasse ?? "", plz = s.plz ?? "", ort = s.ort ?? "";
+    if (s.strasse === undefined && s.adresse && !/adresse fehlt/i.test(s.adresse)) {
+      const m = s.adresse.match(/^(.*?)[,\s]*\b(\d{5})\s+(.+)$/);
+      if (m) { strasse = m[1].trim(); plz = m[2]; ort = m[3].trim(); } else strasse = s.adresse;
+    }
+    let pos = s.lat && s.lng ? { lat: +s.lat, lng: +s.lng } : null;
+    let karteMini = null;
     openModal(isNew ? "Neuer Standort" : "Standort bearbeiten", `<div class="grid">
-      ${field("name", "Bezeichnung (kurz)", s.name, { attrs: 'placeholder="z. B. Gera Zusener Str."' })}
-      ${field("adresse", "Genaue Adresse", s.adresse, { attrs: 'placeholder="Zusener Straße, 07549 Gera"', hint: "Erscheint so im Mietvertrag." })}
-      ${area("notiz", "Notiz", s.notiz, { rows: 2 })}</div>`,
+      ${field("name", "Bezeichnung (kurz)", s.name, { full: true, attrs: 'placeholder="z. B. Gera, Zusener Straße"' })}
+      ${field("strasse", "Straße und Hausnummer", strasse, { full: true, attrs: 'placeholder="z. B. Zusener Straße 12"', hint: "Bei Garagenanlagen ohne Hausnummer nur die Straße." })}
+      ${field("plz", "PLZ", plz, { attrs: 'inputmode="numeric" maxlength="5" placeholder="07549"' })}
+      ${field("ort", "Ort", ort, { attrs: 'placeholder="Gera"' })}
+      </div>
+      <fieldset><legend>Lage auf der Karte</legend>
+        <div class="geo-row"><button type="button" class="btn" id="stSuche">🔎 Adresse auf Karte suchen</button><span class="hint" id="stHint">${pos ? "Position gespeichert. Punkt ziehen zum Korrigieren." : "Noch keine genaue Position."}</span></div>
+        <div class="minikarte" id="stKarte"></div>
+        <p class="hint">Den Punkt auf die Einfahrt der Garagenanlage ziehen oder in die Karte tippen. Diese Position nutzt die Übersichtskarte und die Navigation für alle Garagen dieses Standorts.</p>
+      </fieldset>
+      <div class="grid" style="margin-top:12px">${area("notiz", "Notiz", s.notiz, { rows: 2 })}</div>`,
       [{ label: "Abbrechen" }, { label: "Speichern", cls: "primary", onClick: () => {
         const f = formValues($("#modalBody"));
-        if (!f.name || !f.adresse) { toast("Bitte Bezeichnung und Adresse angeben"); return false; }
-        Object.assign(s, f);
+        if (!f.name) { toast("Bitte eine Bezeichnung angeben"); return false; }
+        if (!f.strasse && !f.ort) { toast("Bitte mindestens Straße oder Ort angeben"); return false; }
+        if (f.plz && !/^\d{5}$/.test(f.plz)) { toast("Die PLZ hat 5 Ziffern"); return false; }
+        const adresse = [f.strasse, [f.plz, f.ort].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+        Object.assign(s, { name: f.name, strasse: f.strasse, plz: f.plz, ort: f.ort, adresse, notiz: f.notiz });
+        if (pos) { s.lat = +pos.lat.toFixed(6); s.lng = +pos.lng.toFixed(6); }
         if (isNew) db.standorte.push(s);
         commit(); toast("Standort gespeichert");
-      } }]);
+      } }],
+      (root) => {
+        karteMini = miniKarte($("#stKarte", root), pos, (lat, lng) => { pos = { lat, lng }; $("#stHint", root).textContent = "Position gesetzt – zum Übernehmen speichern."; });
+        $("#stSuche", root).onclick = async () => {
+          const f = formValues(root);
+          const q = [f.strasse, [f.plz, f.ort].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+          if (!q) return toast("Bitte zuerst Straße und Ort eintragen");
+          $("#stHint", root).textContent = "Suche …";
+          try {
+            let p = await adresseSuchen(q);
+            if (!p && f.strasse && (f.plz || f.ort)) p = await adresseSuchen([f.plz, f.ort].filter(Boolean).join(" "));
+            if (!p) { $("#stHint", root).textContent = "Adresse nicht gefunden – bitte Punkt von Hand in die Karte setzen."; return; }
+            pos = { lat: p.lat, lng: p.lng };
+            karteMini.setze(p.lat, p.lng, 17);
+            $("#stHint", root).textContent = "Gefunden. Punkt ggf. genau auf die Garagen ziehen, dann speichern.";
+          } catch (e) { $("#stHint", root).textContent = e.message; }
+        };
+      });
   }
 
   const standortOptions = () => db.standorte.slice().sort((a, b) => a.name.localeCompare(b.name, "de")).map((s) => [s.id, s.name]);
@@ -1644,7 +1690,36 @@
   function geoFuer(g) {
     if (g.lat && g.lng) return { lat: g.lat, lng: g.lng, eigen: true };
     const s = db.garagen.find((x) => x.standortId === g.standortId && x.lat && x.lng);
-    return s ? { lat: s.lat, lng: s.lng, eigen: false, von: s } : null;
+    if (s) return { lat: s.lat, lng: s.lng, eigen: false, von: s };
+    const st = db.standorte.find((x) => x.id === g.standortId);
+    return st && st.lat && st.lng ? { lat: st.lat, lng: st.lng, eigen: false, vonStandort: true } : null;
+  }
+  // Adresse -> Koordinaten (OpenStreetMap / Nominatim)
+  async function adresseSuchen(q) {
+    let r;
+    try { r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=de&accept-language=de&q=${encodeURIComponent(q)}`); }
+    catch (e) { throw new Error("Adresssuche gerade nicht erreichbar – Punkt bitte von Hand in die Karte setzen."); }
+    if (!r.ok) throw new Error(`Adresssuche nicht möglich (${r.status}) – Punkt bitte von Hand setzen.`);
+    const j = await r.json();
+    return j[0] ? { lat: +j[0].lat, lng: +j[0].lon, name: j[0].display_name } : null;
+  }
+  // Kleine Karte mit verschiebbarem Punkt (Klick oder Ziehen setzt die Position)
+  function miniKarte(el, start, onMove) {
+    if (!window.L) { el.innerHTML = '<p class="hint" style="padding:10px">Karte nicht verfügbar.</p>'; return { setze() {} }; }
+    const map = L.map(el, { scrollWheelZoom: false }).setView(start ? [start.lat, start.lng] : [51.0, 12.0], start ? 17 : 8);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap-Mitwirkende" }).addTo(map);
+    let mk = null;
+    const setze = (lat, lng, zoom) => {
+      if (!mk) {
+        mk = L.marker([lat, lng], { draggable: true }).addTo(map);
+        mk.on("dragend", () => { const p = mk.getLatLng(); onMove(p.lat, p.lng); });
+      } else mk.setLatLng([lat, lng]);
+      map.setView([lat, lng], zoom || Math.max(map.getZoom(), 16));
+    };
+    if (start) setze(+start.lat, +start.lng, 17);
+    map.on("click", (e) => { setze(e.latlng.lat, e.latlng.lng, map.getZoom()); onMove(e.latlng.lat, e.latlng.lng); });
+    setTimeout(() => map.invalidateSize(), 120);
+    return { setze, map };
   }
   function geoAufnehmen(onOk) {
     if (!navigator.geolocation) return toast("Dieses Gerät kann keinen Standort liefern");
@@ -1682,7 +1757,9 @@
           <button type="button" class="btn" id="geoGet" title="Aktuellen Standort des Handys übernehmen">📍 Aufnehmen</button>
           <button type="button" class="btn" id="geoNav" title="Navigation in Google Maps öffnen">🧭 Navigation</button>
         </div>
-        <p class="hint" id="geoHint">Vor der Garage stehen und „Aufnehmen“ tippen, oder in Google Maps lange auf den Punkt drücken, Koordinaten kopieren und hier einfügen.</p>
+        <div class="geo-row" style="margin-top:8px"><input id="adrQ" placeholder="Straße, PLZ Ort suchen" value="${esc((standortById(g.standortId).adresse || "").replace(/adresse fehlt/i, ""))}"><button type="button" class="btn" id="adrGo">🔎 Suchen</button></div>
+        <div class="minikarte" id="gKarte"></div>
+        <p class="hint" id="geoHint">Punkt auf das Garagentor ziehen oder in die Karte tippen. Alternativ vor Ort „Aufnehmen“ tippen oder Koordinaten aus Google Maps einfügen.</p>
       </fieldset>
       <fieldset><legend>Eigentümer &amp; Verpächter</legend><div class="grid">
         ${select("vermieterId", "Eigentümer / Vermieter im Vertrag", vOpts, g.vermieterId || "")}
@@ -1739,8 +1816,27 @@
         };
         stSel.onchange = stUpd; stUpd();
         const geo = $("[name=geo]", root);
+        const startGeo = geoFuer(g);
+        const gk = miniKarte($("#gKarte", root), startGeo ? { lat: +startGeo.lat, lng: +startGeo.lng } : null, (lat, lng) => {
+          geo.value = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+          $("#geoHint", root).textContent = "Position gesetzt – zum Übernehmen speichern.";
+        });
+        geo.addEventListener("change", () => { const p = parseGeo(geo.value); if (p) gk.setze(p[0], p[1], 17); });
+        $("#adrGo", root).onclick = async () => {
+          const q = $("#adrQ", root).value.trim();
+          if (!q) return toast("Bitte eine Adresse eingeben");
+          $("#geoHint", root).textContent = "Suche …";
+          try {
+            const p = await adresseSuchen(q);
+            if (!p) { $("#geoHint", root).textContent = "Adresse nicht gefunden – Punkt von Hand in die Karte setzen."; return; }
+            gk.setze(p.lat, p.lng, 17);
+            geo.value = `${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`;
+            $("#geoHint", root).textContent = "Gefunden. Punkt jetzt genau auf das Garagentor ziehen, dann speichern.";
+          } catch (e) { $("#geoHint", root).textContent = e.message; }
+        };
         $("#geoGet", root).onclick = () => geoAufnehmen((lat, lng, acc) => {
           geo.value = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+          gk.setze(lat, lng, 18);
           $("#geoHint", root).textContent = `Standort übernommen (Genauigkeit ca. ± ${Math.round(acc)} m). Zum Übernehmen noch speichern.`;
         });
         $("#geoNav", root).onclick = () => {
