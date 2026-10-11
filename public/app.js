@@ -610,11 +610,26 @@
         return `${g.nummer} ${standortById(g.standortId).name} ${mieterName(m)} ${g.notiz || ""}`.toLowerCase().includes(garagenFilter.q.toLowerCase());
       })
       .sort(sortGaragen);
-    const unklar = db.standorte.filter((s) => !s.adresse || /adresse fehlt/i.test(s.adresse) || /^(eigentumsgarage|pachtgarage)/i.test(s.name));
+    // Standorte mit unvollständigen Angaben (lässt sich pro Standort mit „Passt so“ ausblenden)
+    const pruefGruende = (st) => {
+      const r = [];
+      const gs = db.garagen.filter((g) => g.standortId === st.id);
+      if (!gs.length) r.push("Standort ist leer");
+      if (!st.adresse || /adresse fehlt/i.test(st.adresse)) r.push("Adresse fehlt");
+      else if (!/\b\d{5}\b/.test(st.adresse)) r.push("PLZ und Ort fehlen in der Adresse");
+      if (/^(eigentumsgarage|pachtgarage)(\s*\(.*\)|\s+nr\.?\s*\d+)?\s*$/i.test(st.name.trim())) r.push("Platzhalter-Name");
+      return r;
+    };
+    const unklar = db.standorte.filter((st) => !st.geprueft).map((st) => ({ st, gruende: pruefGruende(st), gs: db.garagen.filter((g) => g.standortId === st.id) })).filter((x) => x.gruende.length);
     $("#view").innerHTML = `<h1>Garagen</h1><p class="sub">Standorte und einzelne Garagen bzw. Stellplätze verwalten</p>
-    ${unklar.length ? `<div class="panel warnpanel"><div class="panel-head"><h2>${unklar.length} Standort(e) ohne richtige Adresse</h2><span class="meta">Einfach umbenennen und Adresse eintragen – oder die Garage einem vorhandenen Standort zuordnen.</span></div>
-      ${unklar.map((s) => { const gs = db.garagen.filter((g) => g.standortId === s.id); return `<div class="fixrow"><div><b>${esc(s.name)}</b><div class="hint" style="margin:0">${gs.map((g) => { const v = laufenderVertrag(g.id); return `Garage ${esc(g.nummer)}${v ? " · " + esc(mieterName(mieterById(v.mieterId))) : ""}`; }).join(", ") || "keine Garagen"}</div></div>
-        <div class="actions"><button class="btn small primary" data-es="${s.id}">Name &amp; Adresse ändern</button>${gs.length === 1 ? ` <button class="btn small" data-eg="${gs[0].id}">Anderem Standort zuordnen</button>` : ""}</div></div>`; }).join("")}
+    ${unklar.length ? `<div class="panel warnpanel"><div class="panel-head"><h2>${unklar.length} Standort(e) prüfen</h2><span class="meta">Angaben ergänzen – oder mit „Passt so“ ausblenden.</span></div>
+      ${unklar.map(({ st, gruende, gs }) => `<div class="fixrow"><div><b>${esc(st.name)}</b> <span class="hint">${esc(st.adresse || "")}</span>
+          <div class="hint" style="margin:0"><span class="badge gekuendigt">${esc(gruende.join(" · "))}</span> ${gs.map((g) => { const v = laufenderVertrag(g.id); return `Garage ${esc(g.nummer)}${v ? " · " + esc(mieterName(mieterById(v.mieterId))) : ""}`; }).join(", ")}</div></div>
+        <div class="actions">
+          ${gs.length ? `<button class="btn small primary" data-es="${st.id}">Name &amp; Adresse ändern</button>` : `<button class="btn small danger" data-ds="${st.id}">Leeren Standort löschen</button>`}
+          ${gs.length === 1 ? `<button class="btn small" data-eg="${gs[0].id}">Anderem Standort zuordnen</button>` : ""}
+          <button class="btn small" data-ok="${st.id}" title="Hinweis für diesen Standort ausblenden">Passt so</button>
+        </div></div>`).join("")}
     </div>` : ""}
     <div class="panel"><div class="panel-head"><h2>Standorte</h2><div class="actions"><button class="btn primary small" id="addStandort">+ Standort</button></div></div>
       ${db.standorte.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Adresse</th><th class="num">Garagen</th><th></th></tr></thead><tbody>
@@ -639,6 +654,7 @@
 
     $("#addStandort").onclick = () => standortForm();
     $$("[data-es]").forEach((b) => (b.onclick = () => standortForm(db.standorte.find((s) => s.id === b.dataset.es))));
+    $$("[data-ok]").forEach((b) => (b.onclick = () => { const st = db.standorte.find((x) => x.id === b.dataset.ok); st.geprueft = true; commit(); toast(`„${st.name}“ ausgeblendet`); }));
     $$("[data-ds]").forEach((b) => (b.onclick = () => {
       const s = db.standorte.find((x) => x.id === b.dataset.ds);
       const gs = db.garagen.filter((g) => g.standortId === s.id);
