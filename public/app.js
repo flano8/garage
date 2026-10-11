@@ -347,13 +347,23 @@
   /* ================= Router ================= */
   let current = "uebersicht";
   const views = {};
-  function show(view) {
+  const FIN = [["zahlungen", "Mieteingänge"], ["kosten", "Kosten & Belege"], ["rendite", "Rendite"]];
+  const NAV = { zahlungen: "finanzen", kosten: "finanzen", rendite: "finanzen", import: "finanzen", akte: "garagen", mieter: "garagen", vertraege: "garagen" };
+  let finTab = "zahlungen";
+  async function show(view) {
+    if (view === "finanzen") view = finTab;
+    if (FIN.some(([k]) => k === view)) finTab = view;
     current = view;
-    $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
-    views[view]();
+    const nav = NAV[view] || view;
+    $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.view === nav));
+    await views[view]();
+    if (nav === "finanzen" && view !== "import") {
+      $("#view").insertAdjacentHTML("afterbegin", `<div class="subnav">${FIN.map(([k, l]) => `<button class="${k === view ? "on" : ""}" data-fin="${k}">${l}</button>`).join("")}</div>`);
+      $$("[data-fin]").forEach((b) => (b.onclick = () => show(b.dataset.fin)));
+    }
     try { localStorage.setItem("gv-tab", view); } catch (_) { /* */ }
   }
-  const rerender = () => views[current]();
+  const rerender = () => show(current);
   function commit() { save(); rerender(); }
 
   /* ================= Übersicht / Dashboard ================= */
@@ -490,7 +500,7 @@
         const icon = L.divIcon({ className: "", html: `<div class="kmarker ${art}">${n}</div>`, iconSize: [32, 32], iconAnchor: [16, 16], popupAnchor: [0, -14] });
         const mk = L.marker([gr.lat, gr.lng], { icon }).addTo(meine).bindPopup(`<div class="kpop">${zeilen}</div>`);
         mk.on("popupopen", (ev) => {
-          ev.popup.getElement().querySelectorAll("[data-karte-st]").forEach((b) => (b.onclick = () => { garagenFilter.standort = b.dataset.karteSt; show("garagen"); }));
+          ev.popup.getElement().querySelectorAll("[data-karte-st]").forEach((b) => (b.onclick = () => { garagenFilter.standort = b.dataset.karteSt; garagenFilter.q = ""; garagenFilter.status = "alle"; show("garagen"); }));
         });
         punkte.push([gr.lat, gr.lng]);
       });
@@ -630,7 +640,7 @@
     zeigeKarte();
     if ($("#toPay")) $("#toPay").onclick = () => show("zahlungen");
     $$("[data-end]").forEach((b) => (b.onclick = () => vertragBeenden(b.dataset.end)));
-    $$("tr[data-brief]").forEach((tr) => (tr.onclick = () => briefForm(tr.dataset.brief)));
+    $$("tr[data-brief]").forEach((tr) => (tr.onclick = () => { const v = db.vertraege.find((x) => x.id === tr.dataset.brief); if (v) garageDetail(v.garageId); }));
   };
 
   // Tooltip für Diagramme (Maus und Touch)
@@ -708,14 +718,24 @@
   /* ================= Garagen & Standorte ================= */
   let garagenFilter = { standort: "", q: "" };
   views.garagen = () => {
-    const list = db.garagen
-      .filter((g) => !garagenFilter.standort || g.standortId === garagenFilter.standort)
-      .filter((g) => {
-        if (!garagenFilter.q) return true;
-        const v = laufenderVertrag(g.id), m = v && mieterById(v.mieterId);
-        return `${g.nummer} ${standortById(g.standortId).name} ${mieterName(m)} ${g.notiz || ""}`.toLowerCase().includes(garagenFilter.q.toLowerCase());
-      })
-      .sort(sortGaragen);
+    const q = (garagenFilter.q || "").toLowerCase().trim();
+    const zeilen = db.garagen.map((g) => {
+      const v = laufenderVertrag(g.id), m = v && mieterById(v.mieterId), st = standortById(g.standortId);
+      const offen = v ? offeneMonate(v) : [];
+      return { g, v, m, st, stt: garageStatus(g), offen, such: `${g.nummer} ${st.name} ${st.adresse} ${m ? `${mieterName(m)} ${m.telefon || ""} ${m.kennzeichen || ""} ${m.plzOrt || ""}` : "frei"} ${db.vertraege.filter((x) => x.garageId === g.id).map((x) => mieterName(mieterById(x.mieterId))).join(" ")}`.toLowerCase() };
+    });
+    const zaehl = { alle: zeilen.length, vermietet: zeilen.filter((z) => z.stt === "vermietet").length, gekuendigt: zeilen.filter((z) => z.stt === "gekuendigt").length, frei: zeilen.filter((z) => z.stt === "frei").length, rueckstand: zeilen.filter((z) => z.offen.length).length };
+    const filter = garagenFilter.status || "alle";
+    let list = zeilen
+      .filter((z) => !garagenFilter.standort || z.g.standortId === garagenFilter.standort)
+      .filter((z) => filter === "alle" || (filter === "rueckstand" ? z.offen.length : z.stt === filter))
+      .filter((z) => !q || q.split(/\s+/).every((w) => z.such.includes(w)));
+    const sortierung = garagenFilter.sort || "standort";
+    list.sort(sortierung === "mieter" ? (a, b) => (a.m ? a.m.nachname || "" : "~").localeCompare(b.m ? b.m.nachname || "" : "~", "de") || sortGaragen(a.g, b.g)
+      : sortierung === "rueckstand" ? (a, b) => b.offen.length * (a.v ? 1 : 0) - a.offen.length || sortGaragen(a.g, b.g)
+      : (a, b) => sortGaragen(a.g, b.g));
+    if (sortierung === "rueckstand") list.sort((a, b) => (b.offen.length ? b.offen.length * gesamt(b.v) : 0) - (a.offen.length ? a.offen.length * gesamt(a.v) : 0) || sortGaragen(a.g, b.g));
+
     // Standorte mit unvollständigen Angaben (lässt sich pro Standort mit „Passt so“ ausblenden)
     const pruefGruende = (st) => {
       const r = [];
@@ -727,8 +747,30 @@
       return r;
     };
     const unklar = db.standorte.filter((st) => !st.geprueft).map((st) => ({ st, gruende: pruefGruende(st), gs: db.garagen.filter((g) => g.standortId === st.id) })).filter((x) => x.gruende.length);
-    $("#view").innerHTML = `<h1>Garagen</h1><p class="sub">Standorte und einzelne Garagen bzw. Stellplätze verwalten</p>
-    ${unklar.length ? `<div class="panel warnpanel"><div class="panel-head"><h2>${unklar.length} Standort(e) prüfen</h2><span class="meta">Angaben ergänzen – oder mit „Passt so“ ausblenden.</span></div>
+    const chip = (k, l) => `<button class="chip ${filter === k ? "on" : ""}" data-sf="${k}">${l} <span>${zaehl[k]}</span></button>`;
+
+    $("#view").innerHTML = `
+    <div class="dash-head"><div><h1>Garagen</h1><p class="sub">${zaehl.alle} Garagen an ${db.standorte.length} Standorten</p></div>
+      <div class="toolbar" style="margin:0"><button class="btn" id="addGarage" ${db.standorte.length ? "" : "disabled"}>+ Garage</button><button class="btn primary" id="quickV2">+ Neuer Mietvertrag</button></div></div>
+
+    <div class="searchbar"><input id="fQ" type="search" placeholder="🔍  Mieter, Standort, Garagen-Nr., Telefon, Kennzeichen …" value="${esc(garagenFilter.q || "")}" autocomplete="off"></div>
+    <div class="toolbar">
+      ${chip("alle", "Alle")}${chip("vermietet", "Vermietet")}${chip("gekuendigt", "Gekündigt")}${chip("frei", "Frei")}${chip("rueckstand", "Mit Rückstand")}
+      <span class="grow"></span>
+      <select id="fStandort" style="max-width:220px"><option value="">Alle Standorte</option>${db.standorte.slice().sort((a, b) => a.name.localeCompare(b.name, "de")).map((s) => `<option value="${s.id}" ${garagenFilter.standort === s.id ? "selected" : ""}>${esc(s.name)}</option>`).join("")}</select>
+      <select id="fSort" style="max-width:180px"><option value="standort">Nach Standort</option><option value="mieter" ${sortierung === "mieter" ? "selected" : ""}>Nach Mieter A–Z</option><option value="rueckstand" ${sortierung === "rueckstand" ? "selected" : ""}>Höchster Rückstand</option></select>
+    </div>
+
+    <div class="glist">${list.length ? list.map((z) => `
+      <button class="gitem ${z.stt}" data-dg="${z.g.id}">
+        <span class="gdot"></span>
+        <span class="gmain"><b>${z.m ? esc(mieterName(z.m)) : "Frei"}</b><span class="hint">${esc(z.st.name)} · ${z.g.nummer && !/^o\./i.test(z.g.nummer) ? "Nr. " + esc(z.g.nummer) : "ohne Nr."}${istEigen(z.g) ? "" : " · " + esc(vermieterName(z.g))}</span></span>
+        <span class="gmeta">${z.offen.length ? `<span class="badge offen">${eur(z.offen.length * gesamt(z.v))} offen</span>` : z.v ? '<span class="ok">✓</span>' : ""}${z.stt === "gekuendigt" ? `<span class="badge gekuendigt">bis ${dfmt(z.v.endeZum)}</span>` : ""}</span>
+        <span class="gmiete">${z.v ? eur(gesamt(z.v)) : `<span class="hint">${eur(num(z.g.miete) + num(z.g.nebenkosten))}</span>`}</span>
+        <span class="gpfeil">›</span>
+      </button>`).join("") : `<p class="empty">Keine Garage gefunden.</p>`}</div>
+
+    ${unklar.length ? `<div class="panel warnpanel" style="margin-top:18px"><div class="panel-head"><h2>${unklar.length} Standort(e) prüfen</h2><span class="meta">Angaben ergänzen – oder mit „Passt so“ ausblenden.</span></div>
       ${unklar.map(({ st, gruende, gs }) => `<div class="fixrow"><div><b>${esc(st.name)}</b> <span class="hint">${esc(st.adresse || "")}</span>
           <div class="hint" style="margin:0"><span class="badge gekuendigt">${esc(gruende.join(" · "))}</span> ${gs.map((g) => { const v = laufenderVertrag(g.id); return `Garage ${esc(g.nummer)}${v ? " · " + esc(mieterName(mieterById(v.mieterId))) : ""}`; }).join(", ")}</div></div>
         <div class="actions">
@@ -737,28 +779,17 @@
           <button class="btn small" data-ok="${st.id}" title="Hinweis für diesen Standort ausblenden">Passt so</button>
         </div></div>`).join("")}
     </div>` : ""}
-    <div class="panel"><div class="panel-head"><h2>Standorte</h2><div class="actions"><button class="btn primary small" id="addStandort">+ Standort</button></div></div>
+
+    <details class="panel" style="margin-top:18px"><summary><b>Standorte verwalten</b> <span class="hint">(${db.standorte.length})</span></summary>
+      <div class="toolbar" style="margin:12px 0"><button class="btn primary small" id="addStandort">+ Standort</button><button class="btn small" id="bulkGaragen" ${db.standorte.length ? "" : "disabled"}>Mehrere Garagen anlegen</button></div>
       ${db.standorte.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Adresse</th><th class="num">Garagen</th><th></th></tr></thead><tbody>
       ${db.standorte.slice().sort((a, b) => a.name.localeCompare(b.name, "de")).map((s) => `<tr><td><b>${esc(s.name)}</b></td><td>${esc(s.adresse)}</td><td class="num">${db.garagen.filter((g) => g.standortId === s.id).length}</td>
       <td class="act"><button class="btn small" data-es="${s.id}">Bearbeiten</button> <button class="btn small danger" data-ds="${s.id}">Löschen</button></td></tr>`).join("")}
-      </tbody></table></div>` : `<p class="empty">Lege zuerst einen Standort an, z. B. „Gera, Zusener Straße“.</p>`}
-    </div>
-    <div class="toolbar">
-      <select id="fStandort" style="max-width:240px"><option value="">Alle Standorte</option>${db.standorte.map((s) => `<option value="${s.id}" ${garagenFilter.standort === s.id ? "selected" : ""}>${esc(s.name)}</option>`).join("")}</select>
-      <input id="fQ" class="search" placeholder="Suchen (Nr., Mieter …)" value="${esc(garagenFilter.q)}">
-      <span class="grow"></span>
-      <button class="btn" id="bulkGaragen" ${db.standorte.length ? "" : "disabled"}>Mehrere anlegen</button>
-      <button class="btn primary" id="addGarage" ${db.standorte.length ? "" : "disabled"}>+ Garage</button>
-    </div>
-    <div class="panel table-wrap">${list.length ? `<table><thead><tr><th>Standort</th><th>Nr.</th><th>Typ</th><th class="num">m²</th><th class="num">Miete</th><th>Status</th><th>Mieter</th><th></th></tr></thead><tbody>
-      ${list.map((g) => {
-        const v = laufenderVertrag(g.id), m = v && mieterById(v.mieterId), stt = garageStatus(g);
-        return `<tr><td>${esc(standortById(g.standortId).name)}</td><td><b>${esc(g.nummer)}</b></td><td>${esc(g.typ || "Garage")}</td><td class="num">${esc(g.groesse || "")}</td><td class="num">${eur(v ? gesamt(v) : num(g.miete) + num(g.nebenkosten))}</td>
-        <td><span class="badge ${stt}">${statusLabel[stt]}</span></td><td>${esc(m ? mieterName(m) : "")}</td>
-        <td class="act">${geoFuer(g) ? `<a class="btn small" href="${navUrl(geoFuer(g))}" target="_blank" rel="noopener" title="Navigation">🧭</a> ` : ""}<button class="btn small" data-dg="${g.id}">Akte</button> <button class="btn small" data-eg="${g.id}">Bearbeiten</button> <button class="btn small danger" data-xg="${g.id}">Löschen</button></td></tr>`;
-      }).join("")}</tbody></table>` : `<p class="empty">Keine Garagen gefunden.</p>`}</div>`;
+      </tbody></table></div>` : `<p class="empty">Lege zuerst einen Standort an.</p>`}
+    </details>`;
 
     $("#addStandort").onclick = () => standortForm();
+    $("#quickV2").onclick = () => schnellVertrag();
     $$("[data-es]").forEach((b) => (b.onclick = () => standortForm(db.standorte.find((s) => s.id === b.dataset.es))));
     $$("[data-ok]").forEach((b) => (b.onclick = () => { const st = db.standorte.find((x) => x.id === b.dataset.ok); st.geprueft = true; commit(); toast(`„${st.name}“ ausgeblendet`); }));
     $$("[data-ds]").forEach((b) => (b.onclick = () => {
@@ -767,16 +798,14 @@
       if (!gs.length) return confirmModal("Standort löschen?", `„${s.name}“ wird gelöscht.`, () => { db.standorte = db.standorte.filter((x) => x.id !== s.id); commit(); });
       loeschDialog({ titel: `Standort „${s.name}“ löschen?`, garagen: gs, hinweis: `Der Standort wird mit allen ${gs.length} Garagen gelöscht.`, onDone: () => { db.standorte = db.standorte.filter((x) => x.id !== s.id); if (garagenFilter.standort === s.id) garagenFilter.standort = ""; } });
     }));
+    $$("[data-sf]").forEach((b) => (b.onclick = () => { garagenFilter.status = b.dataset.sf; rerender(); }));
     $("#fStandort").onchange = (e) => { garagenFilter.standort = e.target.value; rerender(); };
-    $("#fQ").oninput = (e) => { garagenFilter.q = e.target.value; clearTimeout(views._q); views._q = setTimeout(() => { rerender(); const i = $("#fQ"); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }, 250); };
+    $("#fSort").onchange = (e) => { garagenFilter.sort = e.target.value; rerender(); };
+    $("#fQ").oninput = (e) => { garagenFilter.q = e.target.value; clearTimeout(views._q); views._q = setTimeout(() => { rerender(); const i = $("#fQ"); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }, 200); };
     $("#addGarage").onclick = () => garageForm(null);
     $("#bulkGaragen").onclick = bulkForm;
     $$("[data-dg]").forEach((b) => (b.onclick = () => garageDetail(b.dataset.dg)));
     $$("[data-eg]").forEach((b) => (b.onclick = () => garageForm(garageById(b.dataset.eg))));
-    $$("[data-xg]").forEach((b) => (b.onclick = () => {
-      const g = garageById(b.dataset.xg);
-      loeschDialog({ titel: `Garage ${g.nummer} (${standortById(g.standortId).name}) löschen?`, garagen: [g] });
-    }));
   };
 
   function standortForm(s) {
@@ -1415,7 +1444,7 @@
     };
     monateNeuBerechnen();
     current = "import";
-    $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.view === "zahlungen"));
+    $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.view === "finanzen"));
     views.import();
     if (fehler.length) toast(fehler[0]);
   }
@@ -1734,90 +1763,205 @@
   }
 
   /* ================= Garagen-Akte ================= */
-  async function garageDetail(gid) {
-    const g = garageById(gid);
+  /* ================= Garagen-Akte (eigene Seite) ================= */
+  let akteId = null;
+  function garageDetail(gid) {
+    akteId = gid;
+    try { localStorage.setItem("gv-akte", gid); } catch (_) { /* */ }
+    if (modal.open) modal.close();
+    show("akte");
+    window.scrollTo(0, 0);
+  }
+  const MON = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
+
+  // Monatsraster eines Vertrags: bezahlt / offen / noch nicht fällig / vor Erfassung
+  function zahlungsRaster(v) {
+    const erfAb = v.zahlungenAb || monthKey(v.beginn || today());
+    const start = v.beginn ? monthKey(v.beginn) : erfAb;
+    const von = start < erfAb ? start : erfAb;
+    const faellig = new Set(faelligeMonate(v));
+    let bis = monthKey(today());
+    if (v.status !== "aktiv" && v.endeZum && monthKey(v.endeZum) < bis) bis = monthKey(v.endeZum);
+    const jahre = [];
+    for (let y = Number(bis.slice(0, 4)); y >= Number(von.slice(0, 4)); y--) {
+      const zellen = [];
+      for (let m = 1; m <= 12; m++) {
+        const k = `${y}-${String(m).padStart(2, "0")}`;
+        let cls = "leer", titel = "";
+        if (k >= start && k <= bis) {
+          const bz = db.zahlungen[v.id]?.[k];
+          if (bz) { cls = "bezahlt"; titel = `bezahlt${typeof bz === "string" ? " am " + dfmt(bz) : ""}`; }
+          else if (k < erfAb) { cls = "vor"; titel = "vor Beginn der Erfassung"; }
+          else if (faellig.has(k)) { cls = "offen"; titel = "offen"; }
+          else { cls = "kuenftig"; titel = "noch nicht fällig"; }
+        }
+        zellen.push({ k, m, cls, titel });
+      }
+      jahre.push({ y, zellen });
+    }
+    return { jahre, erfAb, start };
+  }
+
+  views.akte = async () => {
+    const g = garageById(akteId);
+    if (!g) return show("garagen");
     const s = standortById(g.standortId);
-    const v = laufenderVertrag(gid);
+    const v = laufenderVertrag(g.id);
     const m = v && mieterById(v.mieterId);
     const stt = garageStatus(g);
     const offen = v ? offeneMonate(v) : [];
+    const frueher = db.vertraege.filter((x) => x.garageId === g.id && x.status === "beendet").sort((a, b) => (b.endeZum || "").localeCompare(a.endeZum || ""));
     const gKosten = kostenListe().filter((k) => k.garageId === g.id).sort((a, b) => b.datum.localeCompare(a.datum));
     const geo = geoFuer(g);
-    const kosten = kostenJahr(g);
+    const kostenFix = kostenJahr(g), belege12 = belegeJahr(g.id);
     const ein = v ? gesamt(v) * 12 : 0;
     const kp = num(g.kaufpreis);
     const dateien = (g.dateien || []).slice().sort((a, b) => (b.datum || "").localeCompare(a.datum || ""));
     const urls = await Promise.all(dateien.map((f) => dateiUrl(g, f)));
-    let body = `<p><span class="badge ${stt}">${statusLabel[stt]}</span> &nbsp;${esc(s.name)}, ${esc(s.adresse)} <button type="button" class="linkbtn" id="stChange" style="text-decoration:underline">Standort ändern</button></p>
-    <div class="toolbar" style="margin:0 0 10px">
-      ${geo ? `<a class="btn primary" href="${navUrl(geo)}" target="_blank" rel="noopener">🧭 Navigation</a><a class="btn" href="${kartenUrl(geo)}" target="_blank" rel="noopener">Karte</a><button type="button" class="btn" id="geoCopy">Koordinaten kopieren</button>${geo.eigen ? "" : `<span class="hint">Koordinaten von Garage ${esc(geo.von.nummer)} am selben Standort</span>`}`
-        : `<button type="button" class="btn" id="geoNow">📍 Standort jetzt aufnehmen</button><span class="hint">Noch keine Koordinaten hinterlegt.</span>`}
-    </div>
-    <table><tbody>
-      <tr><th>Typ</th><td>${esc(g.art === "Pacht" ? "Pachtgarage" : g.art === "Miete" ? "angemietet" : g.typ || "Garage")}${g.groesse ? ` · ca. ${esc(g.groesse)} m²` : ""}</td></tr>
-      ${istEigen(g) ? "" : `<tr><th>Eigentümer</th><td>${esc(vermieterName(g))}</td></tr>`}
-      ${g.verpaechter ? `<tr><th>Verpächter</th><td style="white-space:pre-line">${esc(g.verpaechter)}</td></tr>` : ""}
-      <tr><th>Miete</th><td>${eur(v ? v.miete : g.miete)}${num(v ? v.nebenkosten : g.nebenkosten) > 0 ? ` + ${eur(v ? v.nebenkosten : g.nebenkosten)} NK` : ""}</td></tr>
-      ${m ? `<tr><th>Mieter</th><td>${esc(mieterName(m))}${m.telefon ? ` · <a href="tel:${esc(m.telefon.replace(/\s/g, ""))}">${esc(m.telefon)}</a>` : ""}${m.kennzeichen ? ` · ${esc(m.kennzeichen)}` : ""}<div class="hint" style="margin:0">${esc([m.strasse, m.plzOrt].filter(Boolean).join(", ") || "Adresse fehlt")}</div></td></tr>
-      <tr><th>Vertrag</th><td>${esc(v.nr)}${v.beginn ? ` seit ${dfmt(v.beginn)}` : ""}${v.status === "gekuendigt" ? ` · gekündigt zum ${dfmt(v.endeZum)}` : ""}</td></tr>
-      <tr><th>Offen</th><td>${offen.length ? `<span class="badge offen">${offen.length} Monat(e) · ${eur(offen.length * gesamt(v))}</span>` : "nichts offen"}</td></tr>` : ""}
-      <tr><th>Rendite</th><td>${hatKosten(g) || kp ? `Kosten ${eur(kosten)}/Jahr · Überschuss ${eur(ein - kosten)}/Jahr${kp ? ` · <b>${fmtPct((ein - kosten) / kp)}</b> auf ${eur(kp)}` : ""}` : '<span class="hint">Kosten noch nicht erfasst</span>'}</td></tr>
-      ${g.notiz ? `<tr><th>Notiz</th><td style="white-space:pre-line">${esc(g.notiz)}</td></tr>` : ""}
-    </tbody></table>
-    <fieldset><legend>Akte · ${dateien.length} Datei(en)</legend>
-      <div class="files">${dateien.map((f, i) => `
-        <div class="file">
-          <a href="${esc(urls[i])}" target="_blank" rel="noopener" class="thumb">${/^image\//.test(f.typ) && urls[i] ? `<img src="${esc(urls[i])}" alt="" loading="lazy">` : `<span class="ficon">${/pdf/.test(f.typ) ? "PDF" : "DATEI"}</span>`}</a>
-          <div class="fname" title="${esc(f.name)}">${esc(f.name)}</div>
-          <div class="fmeta">${dfmt(f.datum)}${f.art ? ` · ${esc(f.art)}` : ""} <button type="button" class="linkbtn" data-fdel="${f.id}" title="Löschen">✕</button></div>
-        </div>`).join("") || '<span class="hint">Noch keine Dateien. Fotos, alte Verträge, Übergabeprotokolle …</span>'}</div>
-      <div class="toolbar" style="margin:10px 0 0">
-        <label class="btn">📷 Foto<input type="file" id="upCam" accept="image/*" capture="environment" hidden></label>
-        <label class="btn">📎 Dateien hinzufügen<input type="file" id="upFile" accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx,.txt" multiple hidden></label>
-        <span class="hint" id="upState"></span>
+    const raster = v ? zahlungsRaster(v) : null;
+    const nrText = g.nummer && !/^o\./i.test(g.nummer) ? `Garage ${g.nummer}` : "Garage ohne Nr.";
+
+    $("#view").innerHTML = `
+    <button class="linkbtn back" id="zurueck">← Alle Garagen</button>
+    <div class="akte-head">
+      <div>
+        <h1>${m ? esc(mieterName(m)) : "Frei"} <span class="badge ${stt}">${statusLabel[stt]}</span>${offen.length ? ` <span class="badge offen">${offen.length} Monat(e) offen</span>` : ""}</h1>
+        <p class="sub" style="margin:0">${esc(s.name)} · ${esc(nrText)}${s.adresse ? ` · ${esc(s.adresse)}` : ""} <button class="linkbtn" id="stChange" style="text-decoration:underline">Standort ändern</button></p>
       </div>
-    </fieldset>`;
-    body += `<fieldset><legend>Kosten · ${eur(gKosten.reduce((s, k) => s + num(k.betrag), 0))} gesamt</legend>
-      ${gKosten.length ? `<table class="compact"><tbody>${gKosten.slice(0, 8).map((k) => `<tr data-kk="${k.id}" style="cursor:pointer"><td>${dfmt(k.datum)}</td><td>${esc(k.beschreibung || k.kategorie)}${k.beleg ? " 🧾" : ""}</td><td class="num"><b>${eur(k.betrag)}</b></td></tr>`).join("")}</tbody></table>${gKosten.length > 8 ? `<p class="hint">+ ${gKosten.length - 8} weitere unter „Kosten“</p>` : ""}` : '<p class="hint" style="margin:0">Noch keine Kosten für diese Garage.</p>'}
-      <div class="toolbar" style="margin:10px 0 0"><button type="button" class="btn" id="kAkte">📷 Beleg für diese Garage erfassen</button></div>
-    </fieldset>`;
-    const actions = [{ label: "Garage bearbeiten", cls: "left", onClick: () => { garageForm(g); return false; } }];
+      <div class="toolbar" style="margin:0">
+        ${geo ? `<a class="btn" href="${navUrl(geo)}" target="_blank" rel="noopener">🧭 Navigation</a>` : `<button class="btn" id="geoNow">📍 Standort aufnehmen</button>`}
+        <button class="btn" id="gEdit">Garage bearbeiten</button>
+      </div>
+    </div>
+
+    <div class="dash">
+      <section class="card span-7">
+        <div class="card-head"><h2>Mieter &amp; Vertrag</h2>${v ? `<span class="meta">${esc(v.nr)}</span>` : ""}</div>
+        ${v ? `
+        <div class="kv">
+          <div><span>Mieter</span><b>${esc(mieterName(m))}</b>${m?.kennzeichen ? ` <span class="hint">· ${esc(m.kennzeichen)}</span>` : ""}</div>
+          <div><span>Telefon</span>${m?.telefon ? `<a href="tel:${esc(m.telefon.replace(/\s/g, ""))}">${esc(m.telefon)}</a>` : '<span class="hint">fehlt</span>'}</div>
+          <div><span>E-Mail</span>${m?.email ? `<a href="mailto:${esc(m.email)}">${esc(m.email)}</a>` : '<span class="hint">–</span>'}</div>
+          <div><span>Anschrift</span>${esc([m?.strasse, m?.plzOrt].filter(Boolean).join(", ")) || '<span class="badge gekuendigt">fehlt</span>'}</div>
+          <div><span>Miete</span><b>${eur(gesamt(v))}</b>${num(v.nebenkosten) > 0 ? ` <span class="hint">(${eur(v.miete)} + ${eur(v.nebenkosten)} NK)</span>` : ""} / Monat</div>
+          <div><span>Vertrag</span>${v.beginn ? `seit ${dfmt(v.beginn)}` : '<span class="hint">Beginn fehlt</span>'}${v.status === "gekuendigt" ? ` · <b>gekündigt zum ${dfmt(v.endeZum)}</b>` : ""}${num(v.kaution) > 0 ? ` · Kaution ${eur(v.kaution)}` : ""}</div>
+          <div><span>Unterschrift</span>${v.sigMieter && v.sigVermieter ? "✓ digital" : v.unterschriebenPapier ? "auf Papier" : v.sigMieter || v.sigVermieter ? "teilweise" : '<span class="hint">noch nicht</span>'}</div>
+        </div>
+        <div class="toolbar" style="margin:14px 0 0">
+          <button class="btn" id="mEdit">Mieter bearbeiten</button>
+          <button class="btn" id="vEdit">Vertrag bearbeiten</button>
+          <button class="btn" id="vPdf">Vertrag (PDF)</button>
+          <button class="btn" id="vSign">Unterschreiben</button>
+          <button class="btn" id="vBrief">Mahnung / Kündigung …</button>
+          ${v.status === "gekuendigt" ? `<button class="btn primary" id="vEnde">Rückgabe erledigt</button>` : ""}
+        </div>` : `
+        <p>Diese Garage ist aktuell <b>frei</b>.</p>
+        <div class="toolbar" style="margin:0"><button class="btn primary" id="vNeu">+ Neuen Mietvertrag anlegen</button></div>`}
+      </section>
+
+      <section class="card span-5">
+        <div class="card-head"><h2>Garage</h2></div>
+        <div class="kv">
+          <div><span>Art</span>${esc(g.art === "Pacht" ? "Pachtgarage" : g.art === "Miete" ? "angemietet" : "Eigentumsgarage")}${g.groesse ? ` · ca. ${esc(g.groesse)} m²` : ""}</div>
+          ${istEigen(g) ? "" : `<div><span>Eigentümer</span>${esc(vermieterName(g))}</div>`}
+          ${g.verpaechter ? `<div><span>Verpächter</span><span style="white-space:pre-line">${esc(g.verpaechter)}</span></div>` : ""}
+          <div><span>Kosten / Jahr</span>${hatKosten(g) ? eur(kostenFix) : '<span class="hint">nicht erfasst</span>'}${belege12 ? ` + ${eur(belege12)} Belege` : ""}</div>
+          <div><span>Rendite</span>${kp ? `<b>${fmtPct((ein - kostenFix - belege12) / kp)}</b> auf ${eur(kp)}` : '<span class="hint">Kaufpreis fehlt</span>'}</div>
+          ${geo ? `<div><span>Lage</span><a href="${kartenUrl(geo)}" target="_blank" rel="noopener">Karte öffnen</a> · <button class="linkbtn" id="geoCopy" style="text-decoration:underline">Koordinaten kopieren</button></div>` : ""}
+        </div>
+        ${g.notiz ? `<div class="notiz">${esc(g.notiz)}</div>` : ""}
+      </section>
+
+      ${v ? `<section class="card span-12">
+        <div class="card-head"><h2>Zahlungen</h2>
+          <div class="legend3"><span><span class="z bezahlt"></span> bezahlt</span><span><span class="z offen"></span> offen</span><span><span class="z kuenftig"></span> noch nicht fällig</span><span><span class="z vor"></span> vor Erfassung</span></div></div>
+        <div class="zahl-sum">${offen.length ? `<b class="bad">${offen.length} Monat(e) offen · ${eur(offen.length * gesamt(v))}</b>` : `<b class="good">✓ Alles bezahlt</b>`}
+          <span class="hint">Monat antippen = bezahlt / offen umschalten</span></div>
+        <div class="zraster">${raster.jahre.map((j) => `<div class="zjahr"><b>${j.y}</b>${j.zellen.map((z) => `<button class="zm ${z.cls}" ${z.cls === "leer" ? "disabled" : `data-mon="${z.k}"`} title="${esc(MON[z.m - 1] + " " + j.y + (z.titel ? ": " + z.titel : ""))}">${MON[z.m - 1]}</button>`).join("")}</div>`).join("")}</div>
+        <div class="toolbar" style="margin:12px 0 0">
+          ${offen.length ? `<button class="btn primary" id="zAlle">Alle offenen Monate als bezahlt markieren</button>` : ""}
+          <label class="hint" style="display:flex;align-items:center;gap:6px">Zahlungen erfassen ab <input type="month" id="zAb" value="${esc(raster.erfAb)}" style="width:auto;padding:4px 8px"></label>
+        </div>
+      </section>` : ""}
+
+      <section class="card span-6">
+        <div class="card-head"><h2>Kosten &amp; Belege</h2><span class="meta">${eur(gKosten.reduce((a, k) => a + num(k.betrag), 0))} gesamt</span></div>
+        ${gKosten.length ? `<table class="compact"><tbody>${gKosten.slice(0, 10).map((k) => `<tr data-kk="${k.id}" style="cursor:pointer"><td>${dfmt(k.datum)}</td><td>${esc(k.beschreibung || k.kategorie)}${k.beleg ? " 🧾" : ""}</td><td class="num"><b>${eur(k.betrag)}</b></td></tr>`).join("")}</tbody></table>` : '<p class="hint" style="margin:0">Noch keine Kosten für diese Garage.</p>'}
+        <div class="toolbar" style="margin:10px 0 0"><button class="btn" id="kAkte">📷 Beleg erfassen</button></div>
+      </section>
+
+      <section class="card span-6">
+        <div class="card-head"><h2>Dateien &amp; Fotos</h2><span class="meta">${dateien.length}</span></div>
+        <div class="files">${dateien.map((f, i) => `
+          <div class="file">
+            <a href="${esc(urls[i])}" target="_blank" rel="noopener" class="thumb">${/^image\//.test(f.typ) && urls[i] ? `<img src="${esc(urls[i])}" alt="" loading="lazy">` : `<span class="ficon">${/pdf/.test(f.typ) ? "PDF" : "DATEI"}</span>`}</a>
+            <div class="fname" title="${esc(f.name)}">${esc(f.name)}</div>
+            <div class="fmeta">${dfmt(f.datum)}${f.art ? ` · ${esc(f.art)}` : ""} <button type="button" class="linkbtn" data-fdel="${f.id}" title="Löschen">✕</button></div>
+          </div>`).join("") || '<span class="hint">Noch keine Dateien.</span>'}</div>
+        <div class="toolbar" style="margin:10px 0 0">
+          <label class="btn">📷 Foto<input type="file" id="upCam" accept="image/*" capture="environment" hidden></label>
+          <label class="btn">📎 Dateien<input type="file" id="upFile" accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx,.txt" multiple hidden></label>
+          <span class="hint" id="upState"></span>
+        </div>
+      </section>
+
+      ${frueher.length ? `<section class="card span-12">
+        <div class="card-head"><h2>Frühere Mieter</h2></div>
+        <table class="compact"><tbody>${frueher.map((x) => { const fm = mieterById(x.mieterId); const o = offeneMonate(x); return `<tr><td><b>${esc(mieterName(fm))}</b>${fm?.telefon ? ` <span class="hint">· ${esc(fm.telefon)}</span>` : ""}</td><td>${x.beginn ? dfmt(x.beginn) : "?"} – ${dfmt(x.endeZum) || "?"}</td><td>${o.length ? `<span class="badge offen">${o.length} Monat(e) offen</span>` : '<span class="hint">nichts offen</span>'}</td><td class="act"><button class="btn small" data-vpdf="${x.id}">PDF</button> <button class="btn small" data-vedit="${x.id}">Bearbeiten</button></td></tr>`; }).join("")}</tbody></table>
+      </section>` : ""}
+    </div>`;
+
+    $("#zurueck").onclick = () => show("garagen");
+    $("#gEdit").onclick = () => garageForm(g);
+    $("#stChange").onclick = () => garageForm(g);
+    if ($("#geoCopy")) $("#geoCopy").onclick = () => { navigator.clipboard?.writeText(`${geo.lat}, ${geo.lng}`); toast("Koordinaten kopiert"); };
+    if ($("#geoNow")) $("#geoNow").onclick = () => geoAufnehmen((lat, lng, acc) => { g.lat = lat; g.lng = lng; commit(); toast(`Standort gespeichert (± ${Math.round(acc)} m)`); });
+    if ($("#vNeu")) $("#vNeu").onclick = () => schnellVertrag({ garageId: g.id });
     if (v) {
-      actions.push({ label: "Vertrag als PDF", onClick: () => { vertragPdf(v.id); return false; } });
-      actions.push({ label: "Zum Vertrag", cls: "primary", onClick: () => { show("vertraege"); setTimeout(() => vertragForm(v), 0); } });
-    } else {
-      actions.push({ label: "Schließen" });
-      actions.push({ label: "Vertrag anlegen", cls: "primary", onClick: () => { schnellVertrag({ garageId: g.id }); return false; } });
-    }
-    openModal(`${g.typ === "Stellplatz" ? "Stellplatz" : "Garage"} ${g.nummer} · ${s.name}`, body, actions, (root) => {
-      $("#stChange", root).onclick = () => garageForm(g);
-      $("#kAkte", root).onclick = () => kostenForm(null, { garageId: g.id });
-      $$("[data-kk]", root).forEach((tr) => (tr.onclick = () => kostenForm(kostenListe().find((k) => k.id === tr.dataset.kk))));
-      if ($("#geoCopy", root)) $("#geoCopy", root).onclick = () => { navigator.clipboard?.writeText(`${geo.lat}, ${geo.lng}`); toast("Koordinaten kopiert"); };
-      if ($("#geoNow", root)) $("#geoNow", root).onclick = () => geoAufnehmen((lat, lng, acc) => { g.lat = lat; g.lng = lng; save(); toast(`Standort gespeichert (± ${Math.round(acc)} m)`); garageDetail(gid); });
-      const upload = async (files) => {
-        const st = $("#upState", root);
-        let ok = 0;
-        for (const file of files) {
-          st.textContent = `Lade ${file.name} …`;
-          try {
-            const blob = await bildVerkleinern(file);
-            const name = blob !== file && !/\.jpe?g$/i.test(file.name) ? file.name.replace(/\.\w+$/, "") + ".jpg" : file.name;
-            await dateiSpeichern(g, blob, name || `Foto ${today()}.jpg`, /^image\//.test(blob.type) ? "Foto" : "");
-            ok++;
-          } catch (e) { toast(e.message); }
-        }
-        if (ok) { toast(`${ok} Datei(en) gespeichert`); garageDetail(gid); } else st.textContent = "";
-      };
-      $("#upCam", root).onchange = (e) => upload([...e.target.files]);
-      $("#upFile", root).onchange = (e) => upload([...e.target.files]);
-      $$("[data-fdel]", root).forEach((b) => (b.onclick = () => {
-        const f = g.dateien.find((x) => x.id === b.dataset.fdel);
-        if (!confirm(`„${f.name}“ löschen?`)) return;
-        dateiLoeschen(g, f).then(() => garageDetail(gid));
+      $("#mEdit").onclick = () => mieterForm(m);
+      $("#vEdit").onclick = () => vertragForm(v);
+      $("#vPdf").onclick = () => vertragPdf(v.id);
+      $("#vSign").onclick = () => signForm(v.id);
+      $("#vBrief").onclick = () => briefForm(v.id);
+      if ($("#vEnde")) $("#vEnde").onclick = () => vertragBeenden(v.id);
+      $$("[data-mon]").forEach((b) => (b.onclick = () => {
+        const z = (db.zahlungen[v.id] = db.zahlungen[v.id] || {});
+        if (z[b.dataset.mon]) delete z[b.dataset.mon]; else z[b.dataset.mon] = today();
+        commit();
       }));
-    });
-  }
+      if ($("#zAlle")) $("#zAlle").onclick = () => {
+        const z = (db.zahlungen[v.id] = db.zahlungen[v.id] || {});
+        offen.forEach((k) => (z[k] = today()));
+        commit(); toast(`${offen.length} Monat(e) als bezahlt markiert`);
+      };
+      $("#zAb").onchange = (e) => { if (e.target.value) { v.zahlungenAb = e.target.value; commit(); } };
+    }
+    $$("[data-vpdf]").forEach((b) => (b.onclick = () => vertragPdf(b.dataset.vpdf)));
+    $$("[data-vedit]").forEach((b) => (b.onclick = () => vertragForm(db.vertraege.find((x) => x.id === b.dataset.vedit))));
+    $("#kAkte").onclick = () => kostenForm(null, { garageId: g.id });
+    $$("[data-kk]").forEach((tr) => (tr.onclick = () => kostenForm(kostenListe().find((k) => k.id === tr.dataset.kk))));
+    const upload = async (files) => {
+      const st = $("#upState");
+      let ok = 0;
+      for (const file of files) {
+        st.textContent = `Lade ${file.name} …`;
+        try {
+          const blob = await bildVerkleinern(file);
+          const name = blob !== file && !/\.jpe?g$/i.test(file.name) ? file.name.replace(/\.\w+$/, "") + ".jpg" : file.name;
+          await dateiSpeichern(g, blob, name || `Foto ${today()}.jpg`, /^image\//.test(blob.type) ? "Foto" : "");
+          ok++;
+        } catch (e) { toast(e.message); }
+      }
+      if (ok) { toast(`${ok} Datei(en) gespeichert`); rerender(); } else st.textContent = "";
+    };
+    $("#upCam").onchange = (e) => upload([...e.target.files]);
+    $("#upFile").onchange = (e) => upload([...e.target.files]);
+    $$("[data-fdel]").forEach((b) => (b.onclick = () => {
+      const f = g.dateien.find((x) => x.id === b.dataset.fdel);
+      if (!confirm(`„${f.name}“ löschen?`)) return;
+      dateiLoeschen(g, f).then(() => rerender());
+    }));
+  };
 
   /* ================= Rendite ================= */
   let renditeFilter = "eigen";
@@ -2171,6 +2315,8 @@
     let start = "uebersicht";
     try { start = localStorage.getItem("gv-tab") || start; } catch (_) { /* */ }
     if (start === "warteliste") start = "kosten";
+    if (start === "mieter" || start === "vertraege") start = "garagen";
+    if (start === "akte") { try { akteId = localStorage.getItem("gv-akte"); } catch (_) { /* */ } if (!garageById(akteId)) start = "garagen"; }
     show(views[start] ? start : "uebersicht");
   })();
 
